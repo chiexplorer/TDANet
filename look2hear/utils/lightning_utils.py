@@ -97,7 +97,7 @@ class MyRichProgressBar(RichProgressBar):
             # file = open("/home/likai/data/Look2Hear/Experiments/run_logs/EdgeFRCNN-Noncausal.log", 'w')
             self._console: Console = Console(force_terminal=True)
             self._console.clear_live()
-            self._metric_component = MetricsTextColumn(trainer, self.theme.metrics)
+            self._metric_component = MetricsTextColumn(trainer, self.theme.metrics, '', '.4f')  # 临时用，适配高版本lightning
             self.progress = CustomProgress(
                 *self.configure_columns(trainer),
                 self._metric_component,

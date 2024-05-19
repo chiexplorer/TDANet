@@ -47,7 +47,7 @@ class AudioLightningModule(pl.LightningModule):
         config=None,
     ):
         super().__init__()
-        self.audio_model = audio_model
+        self.audio_model = audio_model  # TDANet
         self.video_model = video_model
         self.optimizer = optimizer
         self.loss_func = loss_func

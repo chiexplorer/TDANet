@@ -4,6 +4,9 @@ import os
 import soundfile as sf
 from tqdm import tqdm
 
+"""
+    生成用于DataLoader的json文件，指向文件路径
+"""
 
 def preprocess_one_dir(in_data_dir, out_dir, data_type, spk):
     """Create .json file for one condition."""

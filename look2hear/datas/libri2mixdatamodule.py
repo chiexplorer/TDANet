@@ -284,3 +284,27 @@ class Libri2MixDataModule(object):
     @property
     def make_sets(self):
         return self.data_train, self.data_val, self.data_test
+
+
+if __name__ == '__main__':
+    fpath = r"D:\Projects\pyprog\TDANet\DataPreProcess\Libri2Mix\debug"
+    data_configs = {
+        "train_dir": fpath,
+        "valid_dir": fpath,
+        "test_dir": fpath,
+        "n_src": 2,
+        "sample_rate": 8000,
+        "segment": 3.0,
+        "normalize_audio": False,
+        "batch_size": 1,
+        "num_workers": 8,
+        "pin_memory": True,
+        "persistent_workers": False
+    }
+
+    datamodule = Libri2MixDataModule(**data_configs)
+    datamodule.setup()
+    train_loader = datamodule.train_dataloader()
+    for item in train_loader:
+        print(item)
+        break

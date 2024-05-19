@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .base_model import BaseModel
+from look2hear.models.base_model import BaseModel
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -266,9 +266,9 @@ class LA(nn.Module):
         groups = 1
         if inp == oup:
             groups = inp
-        self.local_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
-        self.global_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
-        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
+        self.local_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 样本再编码
+        self.global_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 偏移因子
+        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 缩放因子
         self.act = nn.Sigmoid()
 
     def forward(self, x_l, x_g):
@@ -409,7 +409,7 @@ class TDANet(BaseModel):
         self.num_blocks = num_blocks
         self.upsampling_depth = upsampling_depth
         self.enc_kernel_size = enc_kernel_size * sample_rate // 1000
-        self.enc_num_basis = self.enc_kernel_size // 2 + 1
+        self.enc_num_basis = self.enc_kernel_size // 2 + 1  # 编码器输出通道数
         self.num_sources = num_sources
 
         # Appropriate padding is needed for arbitrary lengths
@@ -485,21 +485,22 @@ class TDANet(BaseModel):
             input_wav, self.enc_kernel_size, self.enc_kernel_size // 4
         )
         # Front end
-        x = self.encoder(x.unsqueeze(1))
+        x = self.encoder(x.unsqueeze(1))  # [B, enc_num_basis, L]
 
         # Split paths
         s = x.clone()
         # Separation module
         x = self.ln(x)
-        x = self.bottleneck(x)
-        x = self.sm(x)
+        x = self.bottleneck(x)  # [B, out_channels, L]
+        x = self.sm(x)  # [B, out_channels, L]
 
-        x = self.mask_net(x)
-        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis, -1)
+        x = self.mask_net(x)  # [B, 2*enc_num_basis, L]
+        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis, -1)  # [B, 2, enc_num_basis, L]
         x = self.mask_nl_class(x)
-        x = x * s.unsqueeze(1)
+        x = x * s.unsqueeze(1)  # [B, 2, enc_num_basis, L]
         # Back end
-        estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))
+        estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))  # [B, 2, T]
+        # 截断至对齐原音频的长度
         estimated_waveforms = estimated_waveforms[
             :,
             :,
@@ -514,3 +515,22 @@ class TDANet(BaseModel):
     def get_model_args(self):
         model_args = {"n_src": 2}
         return model_args
+
+
+if __name__ == '__main__':
+    sr = 8000
+    model_configs = {
+        "out_channels": 128,
+        "in_channels": 512,
+        "num_blocks": 16,
+        "upsampling_depth": 5,
+        "enc_kernel_size": 4,
+        "num_sources": 2
+    }
+    device = 'cpu'
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # model = TDANet(sample_rate=sr, **model_configs).cuda()
+    model = TDANet(sample_rate=sr, **model_configs)
+    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    y = model(x)
+    print(y.shape)

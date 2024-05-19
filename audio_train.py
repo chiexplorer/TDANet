@@ -5,6 +5,7 @@
 # LastEditTime: 2022-06-05 14:51:15
 ###
 import os
+os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"  # 保证windows正常运行
 import sys
 import torch
 from torch import Tensor
@@ -46,13 +47,14 @@ def main(config):
     print_only(
         "Instantiating datamodule <{}>".format(config["datamodule"]["data_name"])
     )
+    # 数据模块
     datamodule: object = getattr(look2hear.datas, config["datamodule"]["data_name"])(
         **config["datamodule"]["data_config"]
     )
     datamodule.setup()
 
     train_loader, val_loader, test_loader = datamodule.make_loader
-    
+
     # Define model and optimizer
     print_only(
         "Instantiating AudioNet <{}>".format(config["audionet"]["audionet_name"])
@@ -131,7 +133,7 @@ def main(config):
         filename="{epoch}",
         monitor="val_loss/dataloader_idx_0",
         mode="min",
-        save_top_k=5,
+        save_top_k=3,
         verbose=True,
         save_last=True,
     )
@@ -144,26 +146,26 @@ def main(config):
 
     # Don't ask GPU if they are not available.
     gpus = config["training"]["gpus"] if torch.cuda.is_available() else None
-    distributed_backend = "cuda" if torch.cuda.is_available() else None
+    distributed_backend = "cuda" if torch.cuda.is_available() else None  # 分布式
 
     # default logger used by trainer
     logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")
     os.makedirs(os.path.join(logger_dir, config["exp"]["exp_name"]), exist_ok=True)
     # comet_logger = TensorBoardLogger(logger_dir, name=config["exp"]["exp_name"])
     comet_logger = WandbLogger(
-            name=config["exp"]["exp_name"], 
-            save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]), 
+            name=config["exp"]["exp_name"],
+            save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]),
             project="Real-work-dataset",
             # offline=True
     )
 
+    # accelerator=distributed_backend,
+    # strategy=DDPStrategy(find_unused_parameters=True),  # 取消分布式
     trainer = pl.Trainer(
         max_epochs=config["training"]["epochs"],
         callbacks=callbacks,
         default_root_dir=exp_dir,
         devices=gpus,
-        accelerator=distributed_backend,
-        strategy=DDPStrategy(find_unused_parameters=True),
         limit_train_batches=1.0,  # Useful for fast experiment
         gradient_clip_val=5.0,
         logger=comet_logger,
@@ -189,6 +191,7 @@ def main(config):
 if __name__ == "__main__":
     import yaml
     from pprint import pprint
+
     from look2hear.utils.parser_utils import (
         prepare_parser_from_dict,
         parse_args_as_dict,

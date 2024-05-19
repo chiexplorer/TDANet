@@ -27,7 +27,7 @@ loss:
 # Training config
 training:
   system: AudioLightningModule
-  gpus: [0,1,2,3]
+  gpus: [0, ]
   parallel: ddp
   epochs: 500
   early_stop:
@@ -61,7 +61,7 @@ datamodule:
     sample_rate: 8000
     segment: 3.0
     normalize_audio: false
-    batch_size: 1
+    batch_size: 4
     num_workers: 8
     pin_memory: true
     persistent_workers: false
