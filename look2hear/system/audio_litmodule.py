@@ -45,6 +45,7 @@ class AudioLightningModule(pl.LightningModule):
         test_loader=None,
         scheduler=None,
         config=None,
+        log_freq=100,
     ):
         super().__init__()
         self.audio_model = audio_model  # TDANet
@@ -56,6 +57,7 @@ class AudioLightningModule(pl.LightningModule):
         self.test_loader = test_loader
         self.scheduler = scheduler
         self.config = {} if config is None else config
+        self.log_freq = log_freq
         # Speed Aug
         self.speedperturb = SpeedPerturb(
             self.config["datamodule"]["data_config"]["sample_rate"],
@@ -108,15 +110,16 @@ class AudioLightningModule(pl.LightningModule):
         # print(mixtures.shape)
         est_sources = self(mixtures)
         loss = self.loss_func["train"](est_sources, targets)
-
-        self.log(
-            "train_loss",
-            loss,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-            logger=True,
-        )
+        # log first step by default
+        if (batch_nb % self.log_freq == 0) and (batch_nb != 0):
+            self.log(
+                "train_loss",
+                loss,
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+                logger=True,
+            )
 
         return {"loss": loss}
 
@@ -128,14 +131,15 @@ class AudioLightningModule(pl.LightningModule):
             # print(mixtures.shape)
             est_sources = self(mixtures)
             loss = self.loss_func["val"](est_sources, targets)
-            self.log(
-                "val_loss",
-                loss,
-                on_epoch=True,
-                prog_bar=True,
-                sync_dist=True,
-                logger=True,
-            )
+            if (batch_nb % self.log_freq == 0) and (batch_nb != 0):
+                self.log(
+                    "val_loss",
+                    loss,
+                    on_epoch=True,
+                    prog_bar=True,
+                    sync_dist=True,
+                    logger=True,
+                )
             
             self.validation_step_outputs.append(loss)
             

@@ -122,6 +122,7 @@ def main(config):
         test_loader=test_loader,
         scheduler=scheduler,
         config=config,
+        log_freq=config["training"]["log_freq"],
     )
 
     # Define callbacks
@@ -142,7 +143,7 @@ def main(config):
     if config["training"]["early_stop"]:
         print_only("Instantiating EarlyStopping")
         callbacks.append(EarlyStopping(**config["training"]["early_stop"]))
-    callbacks.append(MyRichProgressBar(theme=RichProgressBarTheme()))
+    # callbacks.append(MyRichProgressBar(theme=RichProgressBarTheme()))
 
     # Don't ask GPU if they are not available.
     gpus = config["training"]["gpus"] if torch.cuda.is_available() else None
@@ -156,7 +157,7 @@ def main(config):
             name=config["exp"]["exp_name"],
             save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]),
             project="Real-work-dataset",
-            # offline=True
+            offline=True
     )
 
     # accelerator=distributed_backend,

@@ -36,7 +36,7 @@ training:
     patience: 30
     verbose: true
   SpeedAug: False
-  log_freq: 100
+  log_freq: 3
   
 # Optim config
 optimizer:
@@ -55,14 +55,14 @@ scheduler:
 datamodule:
   data_name: Libri2MixDataModule
   data_config:
-    train_dir: DataPreProcess/Libri2Mix/train-100
-    valid_dir: DataPreProcess/Libri2Mix/dev
-    test_dir: DataPreProcess/Libri2Mix/test
+    train_dir: DataPreProcess/Libri2Mix/debug
+    valid_dir: DataPreProcess/Libri2Mix/debug
+    test_dir: DataPreProcess/Libri2Mix/debug
     n_src: 2
     sample_rate: 8000
     segment: 3.0
     normalize_audio: false
-    batch_size: 4
+    batch_size: 1
     num_workers: 8
     pin_memory: true
     persistent_workers: false

@@ -53,14 +53,14 @@ scheduler:
 
 # Data config
 datamodule:
-  data_name: Libri2MixDataModule
+  data_name: LRS2DataModule
   data_config:
     train_dir: DataPreProcess/Libri2Mix/train-100
     valid_dir: DataPreProcess/Libri2Mix/dev
     test_dir: DataPreProcess/Libri2Mix/test
     n_src: 2
-    sample_rate: 8000
-    segment: 3.0
+    sample_rate: 16000
+    segment: 2.0
     normalize_audio: false
     batch_size: 4
     num_workers: 8
