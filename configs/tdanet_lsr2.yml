@@ -68,4 +68,5 @@ datamodule:
     persistent_workers: false
 
 exp:
-  exp_name: TDANet
+  exp_name: RemoteReprod
+  project: TDANet_lsr2

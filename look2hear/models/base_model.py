@@ -5,6 +5,7 @@
 # LastEditTime: 2022-05-26 18:06:22
 ###
 import os
+from collections import OrderedDict
 import torch
 import torch.nn as nn
 from typing import Union, Dict, List
@@ -137,9 +138,12 @@ class BaseModel(nn.Module):
             conf = torch.load(
                 pretrained_model_conf_or_path, map_location="cpu"
             )  # Attempt to find the model and instantiate it.
-            model_class = get(conf["model_name"])
+            # model_class = get(conf["model_name"])
             # model_class = get("Conv_TasNet")
+            model_class = get("TDANet")
             model = model_class(*args, **kwargs)
+            # 去除ckpt中的audio_model前缀
+            conf["state_dict"] = OrderedDict({key.replace('audio_model.', ''): value for key, value in conf["state_dict"].items()})
             model.load_state_dict(conf["state_dict"])
             return model
         else:

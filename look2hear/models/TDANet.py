@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
+from look2hear.models.SeBlock import SEBasicBlock1D
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -125,7 +126,6 @@ class NormAct(nn.Module):
     def forward(self, input):
         output = self.norm(input)
         return self.act(output)
-
 
 class DilatedConv(nn.Module):
     """
@@ -255,7 +255,7 @@ class GlobalAttention(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        x = x + self.drop_path(self.attn(x))
+        x = x + self.drop_path(self.attn(x))  # MHSA消融实验
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -273,8 +273,8 @@ class LA(nn.Module):
 
     def forward(self, x_l, x_g):
         """
-        x_g: global features
         x_l: local features
+        x_g: global features
         """
         B, N, T = x_l.shape
         local_feat = self.local_embedding(x_l)
@@ -288,6 +288,28 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
+class AdaLN(nn.Module):
+    """
+    This class defines the Simplified Adaptive Layer Normalization module.
+    @param feat_l: length of input feature
+    @param feat_g: length of cond feature
+    @param c_out: the number of output channels
+    """
+    def __init__(self, feat_l, feat_g, c_out):
+        super(AdaLN, self).__init__()
+
+        self.adaLN_modulation = nn.Sequential(
+            nn.Linear(feat_g, 2 * feat_l, bias=False),
+            GlobLN(c_out)
+        )
+        self.act = nn.Sigmoid()
+
+    def forward(self, x_l, x_g):
+        gamma, beta = self.adaLN_modulation(x_g).chunk(2, dim=-1)
+        gamma = self.act(gamma)
+        # gamma = gamma.unsqueeze(-1)
+        # beta = beta.unsqueeze(-1)
+        return x_l * gamma + beta
 
 class UConvBlock(nn.Module):
     """
@@ -296,7 +318,7 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
@@ -337,10 +359,11 @@ class UConvBlock(nn.Module):
         :param x: input feature map
         :return: transformed feature map
         """
-        residual = x.clone()
+        residual = x.clone()  # (B, Cout, T)
         # Reduce --> project high-dimensional feature maps to low-dimensional space
-        output1 = self.proj_1x1(x)
-        output = [self.spp_dw[0](output1)]
+        output1 = self.proj_1x1(x)  # (B, Cin, T)
+        # UNet最上层特征是未经过下采样的，由conv1d得到
+        output = [self.spp_dw[0](output1)]  # (B, Cin, T)
 
         # Do the downsampling process from the previous level
         for k in range(1, self.depth):
@@ -352,10 +375,10 @@ class UConvBlock(nn.Module):
         for fea in output:
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
-            ))
-        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
+            )) # [B, Cin, T/2^S]
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, Cin, T/2^S]
 
-        x_fused = []
+        x_fused = []  # 融合gm后的不同尺度特征
         # Gather them now in reverse order
         for idx in range(self.depth):
             tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
@@ -369,11 +392,127 @@ class UConvBlock(nn.Module):
                 expanded = self.last_layer[i](x_fused[i], expanded)
         return self.res_conv(expanded) + residual
 
+class UConvBlockV1(nn.Module):
+    """
+    This class defines the block which performs successive downsampling and
+    upsampling in order to be able to analyze the input features in multiple
+    resolutions.
+    """
+
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
+        super().__init__()
+        assert feat_len is not None, "Fool! You have forggoten to provide the feature length!"
+        self.feat_len = feat_len
+        self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
+        self.depth = upsampling_depth
+        self.spp_dw = nn.ModuleList()
+        self.spp_dw.append(
+            DilatedConvNorm(
+                in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
+            )
+        )
+
+        for i in range(1, upsampling_depth):
+            if i == 0:
+                stride = 1
+            else:
+                stride = 2
+            self.spp_dw.append(
+                DilatedConvNorm(
+                    in_channels,
+                    in_channels,
+                    kSize=2 * stride + 1,
+                    stride=stride,
+                    groups=in_channels,
+                    d=1,
+                )
+            )
+
+        self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
+
+        self.globalatt = GlobalAttention(
+            in_channels * upsampling_depth, in_channels, 0.1
+        )
+        # self.globalatt_mult = nn.ModuleList(
+        #     [GlobalAttention(in_channels, in_channels, 0.1) for _ in range(self.depth)]
+        # )  # 全局特征提取改版
+        self.last_layer = nn.ModuleList([])
+        # 原始LA Layer
+        for i in range(self.depth - 1):
+            self.last_layer.append(LA(in_channels, in_channels, 5))
+
+        """
+        # adaLN 替换 LA Layer(LA改版)
+        feat_len_tmp = feat_len
+        feat_lens = [feat_len]
+        for i in range(self.depth - 2):
+            feat_len_tmp = (feat_len_tmp + 1) // 2
+            feat_lens.append(feat_len_tmp)
+        for i in range(self.depth - 1):
+            if i == self.depth - 2:
+                adaLN_modulation = AdaLN(feat_lens[i], feat_lens[i - 1], in_channels)
+            else:
+                adaLN_modulation = AdaLN(feat_lens[i], feat_lens[i + 1], in_channels)
+            self.last_layer.append(adaLN_modulation)
+        """
+        self.se_block = nn.ModuleList([])
+        # SE Block特征改版
+        for i in range(self.depth):
+            self.se_block.append(SEBasicBlock1D(in_channels, in_channels))
+
+
+    def forward(self, x):
+        """
+        :param x: input feature map
+        :return: transformed feature map
+        """
+        residual = x.clone()  # (B, Cout, T)
+        # Reduce --> project high-dimensional feature maps to low-dimensional space
+        output1 = self.proj_1x1(x)  # (B, Cin, T)
+        # UNet最上层特征是未经过下采样的，由conv1d得到
+        output = [self.spp_dw[0](output1)]  # (B, Cin, T)
+
+        # Do the downsampling process from the previous level
+        for k in range(1, self.depth):
+            out_k = self.spp_dw[k](output[-1])
+            output.append(out_k)
+
+        # global features
+        global_f = []
+        for i, fea in enumerate(output):
+            """
+            # 全局特征提取改版
+            tmp_feat = F.adaptive_avg_pool1d(
+                fea, output_size=output[-1].shape[-1]
+            )
+            global_f.append(self.globalatt_mult[i](tmp_feat))  # [B, Cin, T/2^S]
+            """
+            fea = self.se_block[i](fea)  # SEBlock增强局部特征
+            global_f.append(F.adaptive_avg_pool1d(
+                fea, output_size=output[-1].shape[-1]
+            ))
+
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, Cin, T/2^S]
+        # global_f = torch.stack(global_f, dim=1).sum(1) / float(len(output))  # 全局特征提取改版, 除以长度保持尺度一致
+
+        x_fused = []  # 融合gm后的不同尺度特征
+        # Gather them now in reverse order
+        for idx in range(self.depth):
+            tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
+            x_fused.append(tmp)
+
+        expanded = None
+        for i in range(self.depth - 2, -1, -1):
+            if i == self.depth - 2:
+                expanded = self.last_layer[i](x_fused[i], x_fused[i - 1])
+            else:
+                expanded = self.last_layer[i](x_fused[i], expanded)
+        return self.res_conv(expanded) + residual
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len)  # (LA改版)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -400,6 +539,7 @@ class TDANet(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
+        feat_len=None
     ):
         super(TDANet, self).__init__(sample_rate=sample_rate)
 
@@ -435,7 +575,7 @@ class TDANet(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
+        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)  # (LA改版)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -518,6 +658,8 @@ class TDANet(BaseModel):
 
 
 if __name__ == '__main__':
+    from thop import profile
+    from torchinfo import summary
     sr = 8000
     model_configs = {
         "out_channels": 128,
@@ -525,12 +667,68 @@ if __name__ == '__main__':
         "num_blocks": 16,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
-        "num_sources": 2
+        "num_sources": 2,
+        "feat_len": 3010
     }
-    device = 'cpu'
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # # TDANet测试
+    # feat_len = 3010
     # model = TDANet(sample_rate=sr, **model_configs).cuda()
-    model = TDANet(sample_rate=sr, **model_configs)
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    # x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x, ))
+    # mb = 1024*1024
+    # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_size=(1, 24000), mode="train")
+    # y = model(x)
+    # print(y.shape)
+
+    # # DialateConvNorm——任意shape输入测试
+    # in_channels = 512
+    # mudule = DilatedConvNorm(
+    #     in_channels, in_channels, kSize=5, stride=9, groups=in_channels, d=1
+    # )
+    # x = torch.rand(2, 512, 2016)
+    # y = mudule(x)
+    # print(y.shape)
+
+    # # UConvBlock——参数量测试
+    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    x = torch.rand(1, 128, 3010, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x,))
+    mb = 1024 * 1024
+    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 128, 3010), mode="train")
     y = model(x)
     print(y.shape)
+
+    # # AdaLN测试
+    # model = AdaLN(512, 256, 128).cuda()
+    # x_l = torch.rand(2, 128, 512, device=device)
+    # x_g = torch.rand(2, 128, 256, device=device)
+    # y = model(x_l, x_g)
+    # print("模型参数量详情：")
+    # summary(model, input_size=((2, 128, 512), (2, 128, 256)), mode="train")
+    # print(y.shape)
+
+    # # UConvBlockV1——正确性测试
+    # feat_len = 3010
+    # model = UConvBlockV1(out_channels=128, in_channels=512, upsampling_depth=5, feat_len=feat_len).to(device)
+    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    # # macs, params = profile(model, inputs=(x,))
+    # # mb = 1024 * 1024
+    # # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # # print("模型参数量详情：")
+    # y = model(x)
+    # print(y.shape)
+    # summary(model, input_size=(1, 128, feat_len), mode="train")
+
+    # # GlobalAttention——测试
+    # feat_len = 377
+    # model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
+    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    # y = model(x)
+    # print(y.shape)
+    # summary(model, input_size=(1, 128, feat_len), mode="train")

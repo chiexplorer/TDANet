@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from .base_model import BaseModel
+from look2hear.models.base_model import BaseModel
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -325,7 +325,7 @@ class UConvBlock(nn.Module):
                     d=1,
                 )
             )
-        
+        # 相对base版本增加的模块
         self.loc_glo_fus = nn.ModuleList([])
         for i in range(upsampling_depth):
             self.loc_glo_fus.append(LA(in_channels, in_channels))
@@ -523,3 +523,30 @@ class TDANetBest(BaseModel):
     def get_model_args(self):
         model_args = {"n_src": 2}
         return model_args
+
+
+if __name__ == '__main__':
+    from thop import profile
+    from torchinfo import summary
+    sr = 8000
+    model_configs = {
+        "out_channels": 128,
+        "in_channels": 512,
+        "num_blocks": 16,
+        "upsampling_depth": 5,
+        "enc_kernel_size": 4,
+        "num_sources": 2,
+    }
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # TDANetBest测试
+    feat_len = 3010
+    model = TDANetBest(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x, ))
+    # mb = 1024*1024
+    # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    # print("模型参数量详情：")
+    summary(model, input_size=(1, 24000), mode="train")
+    y = model(x)
+    print(y.shape)

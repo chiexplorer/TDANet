@@ -22,5 +22,21 @@
     [
         "H:\\exp\\dataset\\LibriMix\\Libri2Mix\\wav8k\\min\\dev\\mix_clean\\1272-128104-0006_2428-83705-0022.wav",
         44200
+    ],
+    [
+        "H:\\exp\\dataset\\LibriMix\\Libri2Mix\\wav8k\\min\\dev\\mix_clean\\1272-128104-0006_5536-43363-0010.wav",
+        45120
+    ],
+    [
+        "H:\\exp\\dataset\\LibriMix\\Libri2Mix\\wav8k\\min\\dev\\mix_clean\\1272-128104-0007_652-130726-0020.wav",
+        53440
+    ],
+    [
+        "H:\\exp\\dataset\\LibriMix\\Libri2Mix\\wav8k\\min\\dev\\mix_clean\\1272-128104-0008_1919-142785-0031.wav",
+        40960
+    ],
+    [
+        "H:\\exp\\dataset\\LibriMix\\Libri2Mix\\wav8k\\min\\dev\\mix_clean\\1272-128104-0008_6241-61946-0010.wav",
+        25680
     ]
 ]

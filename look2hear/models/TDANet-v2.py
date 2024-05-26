@@ -306,6 +306,7 @@ class LA(nn.Module):
 
 
 class TDANetBlock(nn.Module):
+    """ 相对UConvBlock，看起来只是将第一个上采样的x_g从x_fused[i-1]改为了x_fused[i+1] """
     def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
