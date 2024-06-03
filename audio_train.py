@@ -42,11 +42,6 @@ parser.add_argument(
     default="local/conf.yml",
     help="Full path to save best validation model",
 )
-parser.add_argument(
-    "--ckpt_path",
-    default="",
-    help="Full path to save best checkpoint file",
-)
 
 def main(config):
     print_only(
@@ -92,9 +87,11 @@ def main(config):
             }
 
     # 似乎Trainer不会导入优化器和调度器的暂存状态，在这里手动载入它们
-    if os.path.exists(config["ckpt_path"]):
+    ckpt_availalbe = os.path.exists(config["exp"]["ckpt_path"])  # ckpt是否有效
+    if ckpt_availalbe:
+        print_only("Loading checkpoint from <{}>".format(config["exp"]["ckpt_path"]))
         ckpt_states = torch.load(
-            config["ckpt_path"], map_location="cpu"
+            config["exp"]["ckpt_path"], map_location="cpu"
         )
         optimizer.load_state_dict(ckpt_states["optimizer_states"][0])
         scheduler.load_state_dict(ckpt_states["lr_schedulers"][0])
@@ -167,11 +164,13 @@ def main(config):
     logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")
     os.makedirs(os.path.join(logger_dir, config["exp"]["exp_name"]), exist_ok=True)
     # comet_logger = TensorBoardLogger(logger_dir, name=config["exp"]["exp_name"])
+    wandb_version_available = "version" in config["exp"] and config["exp"]["version"]  # 是否配置了wandb版本
     comet_logger = WandbLogger(
             name=config["exp"]["exp_name"],
             save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]),
             offline=config["exp"]["offline"] if 'offline' in config["exp"] else True,  # 默认wandb logger为离线模式
             project=config["exp"]["project"],
+            version=config["exp"]["version"] if wandb_version_available else None
     )
     print_only(f"Training with precision [{ config['training']['precision'] if 'precision' in config['training'] else 32 }]")
     # accelerator=distributed_backend,
@@ -190,7 +189,7 @@ def main(config):
         # sync_batchnorm=True,
         # fast_dev_run=True,
     )
-    trainer.fit(system, ckpt_path=r"H:\exp\log\TDANet_logs\Librimix_local_001\epoch=241.ckpt")  # 从checkpoint恢复训练：ckpt_path=xxx
+    trainer.fit(system, ckpt_path=config["exp"]["ckpt_path"] if ckpt_availalbe else None)  # 从checkpoint恢复训练：ckpt_path=xxx
     print_only("Finished Training")
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
     with open(os.path.join(exp_dir, "best_k_models.json"), "w") as f:
@@ -220,5 +219,4 @@ if __name__ == "__main__":
 
     arg_dic, plain_args = parse_args_as_dict(parser, return_plain_args=True)
     # pprint(arg_dic)
-    arg_dic["ckpt_path"] = args.ckpt_path
     main(arg_dic)

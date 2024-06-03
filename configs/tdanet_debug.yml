@@ -73,3 +73,5 @@ exp:
   exp_name: TDANet
   project: TDANet_Debug
   offline: True
+  ckpt_path: H:\exp\log\TDANet_logs\Librimix_local_001\epoch=241.ckpt
+  version:
