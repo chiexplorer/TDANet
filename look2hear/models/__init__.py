@@ -7,13 +7,17 @@
 from .base_model import BaseModel
 from .TDANet import TDANet
 from .TDANet_best import TDANetBest
+from .TDANet_yang import TDANetYang
 from .SeBlock import SEBasicBlock1D
+from .TDANet_origin import TDANetOrigin
 
 __all__ = [
     "BaseModel",
     "TDANet",
     "TDANetBest",
-    "SEBasicBlock1D"
+    "SEBasicBlock1D",
+    "TDANetYang",
+    "TDANetOrigin"
 ]
 
 

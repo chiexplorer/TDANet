@@ -78,6 +78,7 @@ def main(config):
     # conf["train_conf"]["masknet"].update({"n_src": 2})
     # 预训练模型：JusperLee/TDANetBest-4ms-LRS2
     model = getattr(look2hear.models, config["train_conf"]["audionet"]["audionet_name"]).from_pretrain(
+        config["train_conf"]["audionet"]["audionet_name"],
         config["ckpt_path"],
         sample_rate=config["train_conf"]["datamodule"]["data_config"]["sample_rate"],
         **config["train_conf"]["audionet"]["audionet_config"],
@@ -107,7 +108,7 @@ def main(config):
         os.makedirs(s1_path, exist_ok=True)
         os.makedirs(s2_path, exist_ok=True)
     with progress:
-        for idx in progress.track(range(len(test_set))):
+        for idx in tqdm(progress.track(range(len(test_set)))):
             # Forward the network on the mixture.
             mix, sources, key = tensors_to_device(test_set[idx],
                                                     device=model_device)
@@ -120,6 +121,7 @@ def main(config):
                     estimate=est_sources_np,
                     key=key)
             if config["save_output"] == "True":
+                est_sources = est_sources.detach().cpu()
                 torchaudio.save(os.path.join(s1_path, os.path.basename(test_set[idx][2])), est_sources[:, 0, :], config["train_conf"]["datamodule"]["data_config"]["sample_rate"])
                 torchaudio.save(os.path.join(s2_path, os.path.basename(test_set[idx][2])), est_sources[:, 1, :], config["train_conf"]["datamodule"]["data_config"]["sample_rate"])
             # save_dir = "./TDANet"

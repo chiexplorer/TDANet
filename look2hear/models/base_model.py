@@ -132,7 +132,7 @@ class BaseModel(nn.Module):
 
     
     @staticmethod
-    def from_pretrain(pretrained_model_conf_or_path, *args, **kwargs):
+    def from_pretrain(model_name, pretrained_model_conf_or_path, *args, **kwargs):
         from . import get
         if os.path.exists(pretrained_model_conf_or_path):
             conf = torch.load(
@@ -140,7 +140,7 @@ class BaseModel(nn.Module):
             )  # Attempt to find the model and instantiate it.
             # model_class = get(conf["model_name"])
             # model_class = get("Conv_TasNet")
-            model_class = get("TDANet")
+            model_class = get(model_name)
             model = model_class(*args, **kwargs)
             # 去除ckpt中的audio_model前缀
             conf["state_dict"] = OrderedDict({key.replace('audio_model.', ''): value for key, value in conf["state_dict"].items()})

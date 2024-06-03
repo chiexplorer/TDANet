@@ -528,7 +528,7 @@ class TDANetBest(BaseModel):
 if __name__ == '__main__':
     from thop import profile
     from torchinfo import summary
-    sr = 8000
+    sr = 16000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -539,14 +539,25 @@ if __name__ == '__main__':
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # TDANetBest测试
-    feat_len = 3010
-    model = TDANetBest(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    # # TDANetBest测试
+    # feat_len = 3010
+    # model = TDANetBest(sample_rate=sr, **model_configs).cuda()
+    # x = torch.randn(4, 32000, dtype=torch.float32, device=device)
     # macs, params = profile(model, inputs=(x, ))
     # mb = 1024*1024
     # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
     # print("模型参数量详情：")
-    summary(model, input_size=(1, 24000), mode="train")
+    # summary(model, input_size=(4, 32000), mode="train")
+    # y = model(x)
+    # print(y.shape)
+
+    # # UConvBlock——参数量测试
+    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x,))
+    mb = 1024 * 1024
+    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 128, 2010), mode="train")
     y = model(x)
     print(y.shape)

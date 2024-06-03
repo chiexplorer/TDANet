@@ -1,6 +1,6 @@
 # Network config
 audionet:
-  audionet_name: TDANet
+  audionet_name: TDANetBest
   audionet_config:
     out_channels: 128
     in_channels: 512
@@ -55,9 +55,9 @@ scheduler:
 datamodule:
   data_name: LRS2DataModule
   data_config:
-    train_dir: DataPreProcess/Libri2Mix/train-100
-    valid_dir: DataPreProcess/Libri2Mix/dev
-    test_dir: DataPreProcess/Libri2Mix/test
+    train_dir: DataPreProcess/LRS2mix/train-100
+    valid_dir: DataPreProcess/LRS2mix/dev
+    test_dir: DataPreProcess/LRS2mix/test
     n_src: 2
     sample_rate: 16000
     segment: 2.0

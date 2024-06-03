@@ -8,3 +8,8 @@
 
 # outputs
 .results
+
+# local
+.DataPreProcess/Libri2Mix
+.DataPreProcess/LRS2mix
+.pretrained

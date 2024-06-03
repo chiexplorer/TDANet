@@ -6,6 +6,7 @@
 ###
 from audioop import bias
 
+from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -13,6 +14,7 @@ import math
 from look2hear.models.base_model import BaseModel
 from look2hear.models.SeBlock import SEBasicBlock1D
 
+from look2hear.models.attentions import LinearAttention
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -185,6 +187,104 @@ class DilatedConvNorm(nn.Module):
         output = self.conv(input)
         return self.norm(output)
 
+class SAM1D(nn.Module):
+    def __init__(self, dim, ca_num_heads=4, sa_num_heads=8, qkv_bias=False, qk_scale=None,
+                 attn_drop=0., proj_drop=0., ca_attention=1, expand_ratio=2):
+        super().__init__()
+
+        self.ca_attention = ca_attention
+        self.dim = dim
+        self.ca_num_heads = ca_num_heads
+        self.sa_num_heads = sa_num_heads
+
+        assert dim % ca_num_heads == 0, f"dim {dim} should be divided by num_heads {ca_num_heads}."
+        assert dim % sa_num_heads == 0, f"dim {dim} should be divided by num_heads {sa_num_heads}."
+
+        self.act = nn.PReLU()
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.split_groups = self.dim // ca_num_heads
+
+        if ca_attention == 1:
+            # SAM
+            self.v = nn.Linear(dim, dim, bias=qkv_bias)
+            self.s = nn.Linear(dim, dim, bias=qkv_bias)
+            for i in range(self.ca_num_heads):
+                local_conv = nn.Conv1d(dim // self.ca_num_heads, dim // self.ca_num_heads, kernel_size=(3 + i * 2),
+                                       padding=(1 + i), stride=1, groups=dim // self.ca_num_heads)
+                setattr(self, f"local_conv_{i + 1}", local_conv)
+            # SAA
+            self.proj0 = nn.Conv1d(dim, dim * expand_ratio, kernel_size=1, padding=0, stride=1,
+                                   groups=self.split_groups)
+            # self.bn = nn.BatchNorm1d(dim * expand_ratio)  # 原归一化方式
+            self.norm = GlobLN(dim*expand_ratio)  # 向TDANet统一
+            self.proj1 = nn.Conv1d(dim * expand_ratio, dim, kernel_size=1, padding=0, stride=1)
+
+        else:
+            head_dim = dim // sa_num_heads
+            self.scale = qk_scale or head_dim ** -0.5
+            self.q = nn.Linear(dim, dim, bias=qkv_bias)
+            self.attn_drop = nn.Dropout(attn_drop)
+            self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+            self.local_conv = nn.Conv2d(dim, dim, kernel_size=3, padding=1, stride=1, groups=dim)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, nn.Conv1d):
+            fan_out = m.kernel_size[0] * m.out_channels
+            fan_out //= m.groups
+            m.weight.data.normal_(0, math.sqrt(2.0 / fan_out))
+            if m.bias is not None:
+                m.bias.data.zero_()
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        B, N, C = x.shape
+        if self.ca_attention == 1:
+            # MHMC
+            v = self.v(x)
+            s = self.s(x).reshape(B, N, self.ca_num_heads, C // self.ca_num_heads).permute(2, 0, 3, 1)
+            for i in range(self.ca_num_heads):
+                local_conv = getattr(self, f"local_conv_{i + 1}")
+                s_i = s[i]
+                s_i = local_conv(s_i).reshape(B, self.split_groups, -1, N)
+                if i == 0:
+                    s_out = s_i
+                else:
+                    s_out = torch.cat([s_out, s_i], 2)
+            # SAA
+            s_out = s_out.reshape(B, C, N)
+            s_out = self.proj1(self.act(self.norm(self.proj0(s_out))))
+            self.modulator = s_out
+            s_out = s_out.reshape(B, C, N).permute(0, 2, 1)
+            x = s_out * v
+
+        else:
+            q = self.q(x).reshape(B, N, self.sa_num_heads, C // self.sa_num_heads).permute(0, 2, 1, 3)
+            kv = self.kv(x).reshape(B, -1, 2, self.sa_num_heads, C // self.sa_num_heads).permute(2, 0, 3, 1, 4)
+            k, v = kv[0], kv[1]
+            attn = (q @ k.transpose(-2, -1)) * self.scale
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = (attn @ v).transpose(1, 2).reshape(B, N, C) + \
+                self.local_conv(v.transpose(1, 2).reshape(B, N, C).transpose(1, 2).view(B, C, H, W)).view(B, C,
+                                                                                                          N).transpose(
+                    1, 2)
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        x = x.permute(0, 2, 1)
+        return x
+
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_size, drop=0.1):
@@ -229,6 +329,7 @@ class PositionalEncoding(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
+    """ 如何理解将通道和特征维度调序的操作（通道数固定方便实现，且参数量小一些[maybe]）？是否需要两重dropout """
     def __init__(self, in_channels, n_head, dropout, is_casual):
         super().__init__()
         self.pos_enc = PositionalEncoding(in_channels, 10000)
@@ -242,14 +343,19 @@ class MultiHeadAttention(nn.Module):
         x = x.transpose(1, 2)
         attns = None
         output = self.pos_enc(self.attn_in_norm(x))
-        output, _ = self.attn(output, output, output)
-        output = self.norm(output + self.dropout(output))
-        return output.transpose(1, 2)
+        output, _ = self.attn(output, output, output)  # 原代码
+        output = self.norm(output + self.dropout(output))  # 原代码 错误的残差连接方式
+        # output = self.norm(self.dropout(output))  # 修正(1) 去掉output的自加
+        # # 修改代码(2)
+        # attn_output, _ = self.attn(output, output, output)
+        # attn_output = self.norm(output + attn_output)  # 残差连接
 
+        return output.transpose(1, 2)
 
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
+        # dropout+droppath？这表示GA中应用了两重droppout
         self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -279,6 +385,50 @@ class LA(nn.Module):
         B, N, T = x_l.shape
         local_feat = self.local_embedding(x_l)
 
+        global_act = self.global_act(x_g)
+        sig_act = F.interpolate(self.act(global_act), size=T, mode="nearest")
+
+        global_feat = self.global_embedding(x_g)
+        global_feat = F.interpolate(global_feat, size=T, mode="nearest")
+
+        out = local_feat * sig_act + global_feat
+        return out
+
+class SAMLA(nn.Module):
+    def __init__(self, dim: int, inp: int, oup: int, kernel: int = 1, ca_num_heads: int=4) -> None:
+        super().__init__()
+        groups = 1
+        if inp == oup:
+            groups = inp
+        self.local_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 样本再编码
+        self.global_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 偏移因子
+        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)  # 缩放因子
+        assert dim % ca_num_heads == 0, f"dim {dim} should be divided by num_heads {ca_num_heads}."
+        self.ca_num_heads = ca_num_heads
+        self.split_groups = dim // ca_num_heads
+        for i in range(self.ca_num_heads):
+                local_conv = nn.Conv1d(dim // self.ca_num_heads, dim // self.ca_num_heads, kernel_size=(3 + i * 2),
+                                       padding=(1 + i), stride=1, groups=dim // self.ca_num_heads)
+                setattr(self, f"local_conv_{i + 1}", local_conv)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x_l, x_g):
+        """
+        x_l: local features
+        x_g: global features
+        """
+        B, N, T = x_l.shape
+        local_feat = self.local_embedding(x_l)
+        local_feat = local_feat.reshape(B, self.ca_num_heads, N // self.ca_num_heads, T).permute(1, 0, 2, 3)
+        for i in range(self.ca_num_heads):
+            local_conv = getattr(self, f"local_conv_{i + 1}")
+            s_i = local_feat[i]
+            s_i = local_conv(s_i).reshape(B, self.split_groups, -1, T)
+            if i == 0:
+                s_out = s_i
+            else:
+                s_out = torch.cat([s_out, s_i], 2)
+        local_feat = local_feat.reshape(B, N, T)
         global_act = self.global_act(x_g)
         sig_act = F.interpolate(self.act(global_act), size=T, mode="nearest")
 
@@ -328,12 +478,27 @@ class UConvBlock(nn.Module):
                 in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
             )
         )
+        # 卷积注意力改版
+        # self.attn_down = nn.ModuleList()
+        # self.attn_down.append(LinearAttention(in_channels, 4))  # 考虑是否要加到第一层中
+        # self.attn_up = nn.ModuleList()
+        # self.attn_up.append(LinearAttention(in_channels, 4))
+
+        # # 卷积替换avg pooling改版
+        # self.conv_pool = nn.ModuleList()
+        # self.conv_pool.append(
+        #     DilatedConv(
+        #         in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
+        #     )
+        # )
+
 
         for i in range(1, upsampling_depth):
             if i == 0:
                 stride = 1
             else:
                 stride = 2
+                conv_stride = 2 ** i
             self.spp_dw.append(
                 DilatedConvNorm(
                     in_channels,
@@ -344,15 +509,39 @@ class UConvBlock(nn.Module):
                     d=1,
                 )
             )
+            # # 卷积注意力改版
+            # self.attn_down.append(
+            #     LinearAttention(in_channels, 4)
+            # )
+            # self.attn_up.append(
+            #     LinearAttention(in_channels, 4)
+            # )
+            # # 卷积替换avg pooling改版
+            # self.conv_pool.append(
+            #     DilatedConv(
+            #         in_channels,
+            #         in_channels,
+            #         kSize=2 * conv_stride + 1,
+            #         stride=conv_stride,
+            #         groups=in_channels,
+            #         d=1,
+            #     )
+            # )
 
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
-
+        # self.sam_block = SAM1D(dim=in_channels, ca_num_heads=4, ca_attention=1, proj_drop=0.0, sa_num_heads=8, expand_ratio=2)
         self.globalatt = GlobalAttention(
             in_channels * upsampling_depth, in_channels, 0.1
         )
         self.last_layer = nn.ModuleList([])
+        # self.sam_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
             self.last_layer.append(LA(in_channels, in_channels, 5))
+            # # SAM增强LA改版
+            # self.last_layer.append(SAMLA(in_channels,in_channels, in_channels, 5))
+            # # LA后接SAM改版
+            # self.sam_layer.append(SAM1D(dim=in_channels, ca_num_heads=4, ca_attention=1, proj_drop=0.0, sa_num_heads=8, expand_ratio=2))
+
 
     def forward(self, x):
         """
@@ -362,21 +551,33 @@ class UConvBlock(nn.Module):
         residual = x.clone()  # (B, Cout, T)
         # Reduce --> project high-dimensional feature maps to low-dimensional space
         output1 = self.proj_1x1(x)  # (B, Cin, T)
-        # UNet最上层特征是未经过下采样的，由conv1d得到
+        # UNet最底层特征是未经过下采样的，由conv1d得到
         output = [self.spp_dw[0](output1)]  # (B, Cin, T)
+        # output = [self.attn_down[0](self.spp_dw[0](output1))]  # (B, Cin, T)  # 考虑是否加到第一层
 
         # Do the downsampling process from the previous level
         for k in range(1, self.depth):
-            out_k = self.spp_dw[k](output[-1])
+            # out_k = self.attn_down[k-1](self.spp_dw[k](output[-1]))  # 若加到第一层，使用k为idx
+            out_k = self.spp_dw[k](output[-1])  # 原实现
             output.append(out_k)
+
+        # # 卷积替换avg pooling改版
+        # conv_output = []
+        # for k, fea in enumerate(output):
+        #     conv_out_k = self.conv_pool[self.depth - k - 1](fea)
+        #     conv_output.append(conv_out_k)
 
         # global features
         global_f = []
         for fea in output:
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
-            )) # [B, Cin, T/2^S]
-        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, Cin, T/2^S]
+            ))  # [B, Cin, T/2^S]
+            # # 卷积替换avg pooling改版
+            # global_f.append(fea)  # [B, Cin, T/2^S]
+        # global_f = self.sam_block(torch.stack(global_f, dim=1).sum(1))  # SAM替换MHSA
+        # global_f = self.globalatt(global_f)
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, Cin, T/2^S]  # 原代码
 
         x_fused = []  # 融合gm后的不同尺度特征
         # Gather them now in reverse order
@@ -390,6 +591,8 @@ class UConvBlock(nn.Module):
                 expanded = self.last_layer[i](x_fused[i], x_fused[i - 1])
             else:
                 expanded = self.last_layer[i](x_fused[i], expanded)
+            # expanded = self.attn_up[i](expanded)  # 卷积注意力改版
+            # expanded = self.sam_layer[i](expanded)  # SAM增强LA改版
         return self.res_conv(expanded) + residual
 
 class UConvBlockV1(nn.Module):
@@ -518,14 +721,27 @@ class Recurrent(nn.Module):
         self.concat_block = nn.Sequential(
             nn.Conv1d(out_channels, out_channels, 1, 1, groups=out_channels), nn.PReLU()
         )
+        # # concat作为scale因子
+        # self.concat_block_scale = nn.Sequential(
+        #     nn.Conv1d(out_channels, out_channels, 1, 1, groups=out_channels), nn.Sigmoid()
+        # )
 
     def forward(self, x):
         mixture = x.clone()
         for i in range(self.iter):
+            # # concat_block消融实验
+            # if i == 0:
+            #     x = self.unet(x)
+            # else:
+            #     x = self.unet(mixture + x)
+            # # 原代码
             if i == 0:
                 x = self.unet(x)
             else:
                 x = self.unet(self.concat_block(mixture + x))
+            # # 改为掩模形式，更倾向于RNN
+            # x = self.concat_block_scale(self.unet(x)) * x
+
         return x
 
 
@@ -693,16 +909,16 @@ if __name__ == '__main__':
     # y = mudule(x)
     # print(y.shape)
 
-    # # UConvBlock——参数量测试
-    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
-    x = torch.rand(1, 128, 3010, dtype=torch.float32, device=device)
-    macs, params = profile(model, inputs=(x,))
-    mb = 1024 * 1024
-    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_size=(1, 128, 3010), mode="train")
-    y = model(x)
-    print(y.shape)
+    # # # UConvBlock——参数量测试
+    # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    # x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x,))
+    # mb = 1024 * 1024
+    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_size=(1, 128, 2010), mode="train")
+    # y = model(x)
+    # print(y.shape)
 
     # # AdaLN测试
     # model = AdaLN(512, 256, 128).cuda()
@@ -725,10 +941,10 @@ if __name__ == '__main__':
     # print(y.shape)
     # summary(model, input_size=(1, 128, feat_len), mode="train")
 
-    # # GlobalAttention——测试
-    # feat_len = 377
-    # model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
-    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
-    # y = model(x)
-    # print(y.shape)
-    # summary(model, input_size=(1, 128, feat_len), mode="train")
+    # GlobalAttention——测试
+    feat_len = 377
+    model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
+    x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    y = model(x)
+    print(y.shape)
+    summary(model, input_size=(1, 128, feat_len), mode="train")

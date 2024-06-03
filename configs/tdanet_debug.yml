@@ -38,6 +38,7 @@ training:
     verbose: true
   SpeedAug: False
   log_freq: 3
+  precision: 16
   
 # Optim config
 optimizer:

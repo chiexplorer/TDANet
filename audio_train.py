@@ -156,10 +156,10 @@ def main(config):
     comet_logger = WandbLogger(
             name=config["exp"]["exp_name"],
             save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]),
-            project="Real-work-dataset",
-            offline=True
+            offline=False,
+            project=config["exp"]["project"],
     )
-
+    print_only(f"Training with precision [{ config['training']['precision'] if 'precision' in config['training'] else 32 }]")
     # accelerator=distributed_backend,
     # strategy=DDPStrategy(find_unused_parameters=True),  # 取消分布式
     trainer = pl.Trainer(
@@ -171,11 +171,12 @@ def main(config):
         gradient_clip_val=5.0,
         logger=comet_logger,
         sync_batchnorm=True,
+        precision=config["training"]["precision"] if 'precision' in config["training"] else 32,  # 若配置了precision，则应用
         # num_sanity_val_steps=0,
         # sync_batchnorm=True,
         # fast_dev_run=True,
     )
-    trainer.fit(system)
+    trainer.fit(system)  # 从checkpoint恢复训练：ckpt_path=xxx
     print_only("Finished Training")
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
     with open(os.path.join(exp_dir, "best_k_models.json"), "w") as f:
