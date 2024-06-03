@@ -70,6 +70,7 @@ datamodule:
 exp:
   exp_name: RemoteReprod
   project: TDANet_lsr2
+  offline: True
 
 main_args:
   exp_dir: D:\Projects\pyprog\TDANet\pretrained\lsr2_4ms

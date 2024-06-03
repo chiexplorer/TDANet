@@ -255,3 +255,35 @@ class AudioLightningModule(pl.LightningModule):
             elif isinstance(v, (list, tuple)):
                 dic[k] = torch.tensor(v)
         return dic
+
+
+if __name__ == '__main__':
+    import argparse, yaml
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--conf_dir",
+                        default="local/mixit_conf.yml",
+                        help="Full path to save best validation model")
+    parser.add_argument("--ckpt_path",
+                        default="",
+                        help="save path of checkpoint file")
+    parser.add_argument("--save_output",
+                        default="False",
+                        help="whether to save the separated audios")
+    parser.add_argument("--save_path",
+                        default="./separated",
+                        help="save path of separated audios")
+    args = parser.parse_args()
+    arg_dic = dict(vars(args))
+    args.conf_dir = r"H:\exp\log\TDANet_remote\LSR2mix\TDANet_lsr2_remote复现\conf.yml"
+    # Load training config
+    with open(args.conf_dir, "rb") as f:
+        train_conf = yaml.safe_load(f)
+    arg_dic["train_conf"] = train_conf
+
+    model = AudioLightningModule.load_from_checkpoint(
+        r"H:\exp\log\TDANet_remote\LSR2mix\TDANet_lsr2_remote复现\epoch=199.ckpt",
+        config=train_conf,
+        strict=False
+    )
+    print("done~")

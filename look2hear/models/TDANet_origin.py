@@ -400,6 +400,7 @@ class TDANetOrigin(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
+        feat_len=3010
     ):
         super(TDANetOrigin, self).__init__(sample_rate=sample_rate)
 

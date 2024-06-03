@@ -70,3 +70,4 @@ datamodule:
 exp:
   exp_name: RemoteReprod
   project: TDANet_lsr2
+  offline: True

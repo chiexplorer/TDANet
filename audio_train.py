@@ -42,6 +42,11 @@ parser.add_argument(
     default="local/conf.yml",
     help="Full path to save best validation model",
 )
+parser.add_argument(
+    "--ckpt_path",
+    default="",
+    help="Full path to save best checkpoint file",
+)
 
 def main(config):
     print_only(
@@ -63,6 +68,7 @@ def main(config):
         sample_rate=config["datamodule"]["data_config"]["sample_rate"],
         **config["audionet"]["audionet_config"],
     )
+
     # import pdb; pdb.set_trace()
     print_only("Instantiating Optimizer <{}>".format(config["optimizer"]["optim_name"]))
     optimizer = make_optimizer(model.parameters(), **config["optimizer"])
@@ -84,6 +90,14 @@ def main(config):
                 ),
                 "interval": "step",
             }
+
+    # 似乎Trainer不会导入优化器和调度器的暂存状态，在这里手动载入它们
+    if os.path.exists(config["ckpt_path"]):
+        ckpt_states = torch.load(
+            config["ckpt_path"], map_location="cpu"
+        )
+        optimizer.load_state_dict(ckpt_states["optimizer_states"][0])
+        scheduler.load_state_dict(ckpt_states["lr_schedulers"][0])
 
     # Just after instantiating, save the args. Easy loading in the future.
     config["main_args"]["exp_dir"] = os.path.join(
@@ -156,7 +170,7 @@ def main(config):
     comet_logger = WandbLogger(
             name=config["exp"]["exp_name"],
             save_dir=os.path.join(logger_dir, config["exp"]["exp_name"]),
-            offline=False,
+            offline=config["exp"]["offline"] if 'offline' in config["exp"] else True,  # 默认wandb logger为离线模式
             project=config["exp"]["project"],
     )
     print_only(f"Training with precision [{ config['training']['precision'] if 'precision' in config['training'] else 32 }]")
@@ -176,7 +190,7 @@ def main(config):
         # sync_batchnorm=True,
         # fast_dev_run=True,
     )
-    trainer.fit(system)  # 从checkpoint恢复训练：ckpt_path=xxx
+    trainer.fit(system, ckpt_path=r"H:\exp\log\TDANet_logs\Librimix_local_001\epoch=241.ckpt")  # 从checkpoint恢复训练：ckpt_path=xxx
     print_only("Finished Training")
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
     with open(os.path.join(exp_dir, "best_k_models.json"), "w") as f:
@@ -206,4 +220,5 @@ if __name__ == "__main__":
 
     arg_dic, plain_args = parse_args_as_dict(parser, return_plain_args=True)
     # pprint(arg_dic)
+    arg_dic["ckpt_path"] = args.ckpt_path
     main(arg_dic)
