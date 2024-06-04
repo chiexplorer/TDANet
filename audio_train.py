@@ -87,7 +87,7 @@ def main(config):
             }
 
     # 似乎Trainer不会导入优化器和调度器的暂存状态，在这里手动载入它们
-    ckpt_availalbe = os.path.exists(config["exp"]["ckpt_path"])  # ckpt是否有效
+    ckpt_availalbe = "ckpt_path" in config["exp"] and os.path.exists(config["exp"]["ckpt_path"])  # ckpt是否有效
     if ckpt_availalbe:
         print_only("Loading checkpoint from <{}>".format(config["exp"]["ckpt_path"]))
         ckpt_states = torch.load(

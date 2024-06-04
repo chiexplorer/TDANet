@@ -1,8 +1,20 @@
+###
+# Author: Kai Li
+# Date: 2022-05-03 18:11:15
+# Email: lk21@mails.tsinghua.edu.cn
+# LastEditTime: 2022-08-29 16:44:07
+###
+from audioop import bias
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
+
+'''
+    多分辨率卷积卷积编码器
+'''
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -11,9 +23,9 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
 
     shape = (x.shape[0],) + (1,) * (
         x.ndim - 1
-    )
+    )  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-    random_tensor.floor_()
+    random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
     return output
 
@@ -44,24 +56,8 @@ class _LayerNorm(nn.Module):
         return (self.gamma * normed_x.transpose(1, -1) + self.beta).transpose(1, -1)
 
 
-class GlobLN(_LayerNorm):
-    """Global Layer Normalization (globLN)."""
-
-    def forward(self, x):
-        """ Applies forward pass.
-
-        Works for any input size > 2D.
-
-        Args:
-            x (:class:`torch.Tensor`): Shape `[batch, chan, *]`
-
-        Returns:
-            :class:`torch.Tensor`: gLN_x `[batch, chan, *]`
-        """
-        dims = list(range(1, len(x.shape)))
-        mean = x.mean(dim=dims, keepdim=True)
-        var = torch.pow(x - mean, 2).mean(dim=dims, keepdim=True)
-        return self.apply_gain_and_bias((x - mean) / (var + 1e-8).sqrt())
+def GlobLN(nOut):
+    return nn.GroupNorm(1, nOut, eps=1e-8)
 
 
 class ConvNormAct(nn.Module):
@@ -185,6 +181,7 @@ class DilatedConvNorm(nn.Module):
             padding=((kSize - 1) // 2) * d,
             groups=groups,
         )
+        # self.norm = nn.GroupNorm(1, nOut, eps=1e-08)
         self.norm = GlobLN(nOut)
 
     def forward(self, input):
@@ -192,7 +189,7 @@ class DilatedConvNorm(nn.Module):
         return self.norm(output)
 
 
-class FFN(nn.Module):
+class Mlp(nn.Module):
     def __init__(self, in_features, hidden_size, drop=0.1):
         super().__init__()
         self.fc1 = ConvNorm(in_features, hidden_size, 1, bias=False)
@@ -211,6 +208,7 @@ class FFN(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
 
 class PositionalEncoding(nn.Module):
     def __init__(self, in_channels, max_length):
@@ -251,17 +249,37 @@ class MultiHeadAttention(nn.Module):
         output = self.norm(output + self.dropout(output))
         return output.transpose(1, 2)
 
-class GA(nn.Module):
+class MultiHeadAttentionFixed(nn.Module):
+    """ nn.MHA with batch_first=True """
+    def __init__(self, in_channels, n_head, dropout, is_casual):
+        super().__init__()
+        self.pos_enc = PositionalEncoding(in_channels, 10000)
+        self.attn_in_norm = nn.LayerNorm(in_channels)
+        self.attn = nn.MultiheadAttention(in_channels, n_head, dropout, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(in_channels)
+        self.is_casual = is_casual
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        attns = None
+        output = self.pos_enc(self.attn_in_norm(x))
+        output, _ = self.attn(output, output, output)
+        output = self.norm(output + self.dropout(output))
+        return output.transpose(1, 2)
+
+class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        self.mlp = FFN(out_chan, out_chan * 2, drop=0.1)
+        self.attn = MultiHeadAttentionFixed(out_chan, 8, 0.1, False)
+        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
         x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
+
 
 class LA(nn.Module):
     def __init__(self, inp: int, oup: int, kernel: int = 1) -> None:
@@ -290,6 +308,26 @@ class LA(nn.Module):
 
         out = local_feat * sig_act + global_feat
         return out
+
+class ConvEncoder(nn.Module):
+    def __init__(self, enc_kernel_size, sample_rate, kernels=3, bias=False):
+        super().__init__()
+        self.base_ks = enc_kernel_size * sample_rate // 1000
+        self.kernels = kernels
+        self.conv_list = nn.ModuleList()
+        for k in range(1, kernels + 1):
+            conv_ks = k * self.base_ks
+            self.conv_list.append(
+                nn.Conv1d(1, self.base_ks // 2 + 1, conv_ks, stride=self.base_ks // 4, padding=conv_ks // 2, bias=bias)
+            )
+
+    def forward(self, x):
+        for i in range(self.kernels):
+            if i == 0:
+                emb = self.conv_list[i](x)
+            else:
+                emb = torch.cat([emb, self.conv_list[i](x)], dim=1)
+        return emb
 
 
 class UConvBlock(nn.Module):
@@ -325,19 +363,18 @@ class UConvBlock(nn.Module):
                     d=1,
                 )
             )
-        # 相对base版本增加的模块
-        self.loc_glo_fus = nn.ModuleList([])
-        for i in range(upsampling_depth):
-            self.loc_glo_fus.append(LA(in_channels, in_channels))
-        
+
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
-        self.globalatt = GA(
+        self.globalatt = GlobalAttention(
             in_channels * upsampling_depth, in_channels, 0.1
         )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
             self.last_layer.append(LA(in_channels, in_channels, 5))
+
+        # # 自适应权重
+        # self.ada_global_weights = torch.nn.Parameter(torch.full((self.depth, ), 1/self.depth), requires_grad=True)
 
     def forward(self, x):
         """
@@ -355,20 +392,25 @@ class UConvBlock(nn.Module):
             output.append(out_k)
 
         # global features
-        global_f = torch.zeros(
-            output[-1].shape, requires_grad=True, device=output1.device
-        )
+        global_f = []
         for fea in output:
-            global_f = global_f + F.adaptive_avg_pool1d(
+            global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
-            )
-        global_f = self.globalatt(global_f)  # [B, N, T]
+            ))
+
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]  # 原代码
+        # global_f = self.globalatt(
+        #     sum(
+        #         w * rep * self.depth for w, rep in zip(torch.softmax(self.ada_global_weights, dim=0), global_f)
+        #     )
+        # )
+
 
         x_fused = []
         # Gather them now in reverse order
         for idx in range(self.depth):
-            local = output[idx]
-            x_fused.append(self.loc_glo_fus[idx](local, global_f))
+            tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
+            x_fused.append(tmp)
 
         expanded = None
         for i in range(self.depth - 2, -1, -1):
@@ -376,7 +418,6 @@ class UConvBlock(nn.Module):
                 expanded = self.last_layer[i](x_fused[i], x_fused[i - 1])
             else:
                 expanded = self.last_layer[i](x_fused[i], expanded)
-
         return self.res_conv(expanded) + residual
 
 
@@ -385,6 +426,7 @@ class Recurrent(nn.Module):
         super().__init__()
         self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
         self.iter = _iter
+        # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
             nn.Conv1d(out_channels, out_channels, 1, 1, groups=out_channels), nn.PReLU()
         )
@@ -399,7 +441,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetBest(BaseModel):
+class TDANetMultRes(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -409,8 +451,10 @@ class TDANetBest(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
+        feat_len=3010,
+        kernels=3
     ):
-        super(TDANetBest, self).__init__(sample_rate=sample_rate)
+        super(TDANetMultRes, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -420,6 +464,7 @@ class TDANetBest(BaseModel):
         self.enc_kernel_size = enc_kernel_size * sample_rate // 1000
         self.enc_num_basis = self.enc_kernel_size // 2 + 1
         self.num_sources = num_sources
+        self.kernels = kernels
 
         # Appropriate padding is needed for arbitrary lengths
         self.lcm = abs(
@@ -427,31 +472,33 @@ class TDANetBest(BaseModel):
         ) // math.gcd(self.enc_kernel_size // 4, 4 ** self.upsampling_depth)
 
         # Front end
-        self.encoder = nn.Conv1d(
-            in_channels=1,
-            out_channels=self.enc_num_basis,
-            kernel_size=self.enc_kernel_size,
-            stride=self.enc_kernel_size // 4,
-            padding=self.enc_kernel_size // 2,
-            bias=False,
-        )
-        torch.nn.init.xavier_uniform_(self.encoder.weight)
+        # self.encoder = nn.Conv1d(
+        #     in_channels=1,
+        #     out_channels=self.enc_num_basis,
+        #     kernel_size=self.enc_kernel_size,
+        #     stride=self.enc_kernel_size // 4,
+        #     padding=self.enc_kernel_size // 2,
+        #     bias=False,
+        # )
+        self.encoder = ConvEncoder(enc_kernel_size, sample_rate, kernels=kernels)
+        for block in self.encoder.conv_list:
+            torch.nn.init.xavier_uniform_(block.weight)
 
         # Norm before the rest, and apply one more dense layer
-        self.ln = GlobLN(self.enc_num_basis)
+        self.ln = GlobLN(self.enc_num_basis*kernels)
         self.bottleneck = nn.Conv1d(
-            in_channels=self.enc_num_basis, out_channels=out_channels, kernel_size=1
+            in_channels=self.enc_num_basis*kernels, out_channels=out_channels, kernel_size=1
         )
 
         # Separation module
         self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
-        mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
+        mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis*kernels, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
 
         # Back end
         self.decoder = nn.ConvTranspose1d(
-            in_channels=self.enc_num_basis * num_sources,
+            in_channels=self.enc_num_basis*kernels * num_sources,
             out_channels=num_sources,
             kernel_size=self.enc_kernel_size,
             stride=self.enc_kernel_size // 4,
@@ -504,7 +551,7 @@ class TDANetBest(BaseModel):
         x = self.sm(x)
 
         x = self.mask_net(x)
-        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis, -1)
+        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis*self.kernels, -1)
         x = self.mask_nl_class(x)
         x = x * s.unsqueeze(1)
         # Back end
@@ -528,7 +575,7 @@ class TDANetBest(BaseModel):
 if __name__ == '__main__':
     from thop import profile
     from torchinfo import summary
-    sr = 16000
+    sr = 8000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -536,20 +583,30 @@ if __name__ == '__main__':
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
+        "feat_len": 3010
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # TDANetBest测试
+    # TDANet测试
     feat_len = 3010
-    model = TDANetBest(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(4, 32000, dtype=torch.float32, device=device)
+    model = TDANetMultRes(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1024*1024
     print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
-    summary(model, input_size=(4, 32000), mode="train")
+    summary(model, input_size=(1, 24000), mode="train")
     y = model(x)
     print(y.shape)
+
+    # # DialateConvNorm——任意shape输入测试
+    # in_channels = 512
+    # mudule = DilatedConvNorm(
+    #     in_channels, in_channels, kSize=5, stride=9, groups=in_channels, d=1
+    # )
+    # x = torch.rand(2, 512, 2016)
+    # y = mudule(x)
+    # print(y.shape)
 
     # # # UConvBlock——参数量测试
     # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
@@ -561,3 +618,39 @@ if __name__ == '__main__':
     # summary(model, input_size=(1, 128, 2010), mode="train")
     # y = model(x)
     # print(y.shape)
+
+    # # AdaLN测试
+    # model = AdaLN(512, 256, 128).cuda()
+    # x_l = torch.rand(2, 128, 512, device=device)
+    # x_g = torch.rand(2, 128, 256, device=device)
+    # y = model(x_l, x_g)
+    # print("模型参数量详情：")
+    # summary(model, input_size=((2, 128, 512), (2, 128, 256)), mode="train")
+    # print(y.shape)
+
+    # # UConvBlockV1——正确性测试
+    # feat_len = 3010
+    # model = UConvBlockV1(out_channels=128, in_channels=512, upsampling_depth=5, feat_len=feat_len).to(device)
+    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    # # macs, params = profile(model, inputs=(x,))
+    # # mb = 1024 * 1024
+    # # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # # print("模型参数量详情：")
+    # y = model(x)
+    # print(y.shape)
+    # summary(model, input_size=(1, 128, feat_len), mode="train")
+
+    # # GlobalAttention——测试
+    # feat_len = 377
+    # model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
+    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    # y = model(x)
+    # print(y.shape)
+    # summary(model, input_size=(1, 128, feat_len), mode="train")
+
+
+    # # # 多分辨率卷积编码器——测试
+    # encoder = ConvEncoder(4, 8000, kernels=3).cuda()
+    # x = torch.rand(1, 1, 24000, device=device)
+    # emb = encoder(x)
+    # print(emb.shape)

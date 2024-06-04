@@ -246,16 +246,34 @@ class MultiHeadAttention(nn.Module):
         output = self.norm(output + self.dropout(output))
         return output.transpose(1, 2)
 
+class MultiHeadAttentionFixed(nn.Module):
+    """ nn.MHA with batch_first=True """
+    def __init__(self, in_channels, n_head, dropout, is_casual):
+        super().__init__()
+        self.pos_enc = PositionalEncoding(in_channels, 10000)
+        self.attn_in_norm = nn.LayerNorm(in_channels)
+        self.attn = nn.MultiheadAttention(in_channels, n_head, dropout, batch_first=True)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(in_channels)
+        self.is_casual = is_casual
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        attns = None
+        output = self.pos_enc(self.attn_in_norm(x))
+        output, _ = self.attn(output, output, output)
+        output = self.norm(output + self.dropout(output))
+        return output.transpose(1, 2)
 
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
+        self.attn = MultiHeadAttentionFixed(out_chan, 8, 0.1, False)
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        # x = x + self.drop_path(self.attn(x))
+        x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -287,6 +305,26 @@ class LA(nn.Module):
 
         out = local_feat * sig_act + global_feat
         return out
+
+class ConvEncoder(nn.Module):
+    def __init__(self, enc_kernel_size, sample_rate, kernels=3, bias=False):
+        super().__init__()
+        self.base_ks = enc_kernel_size * sample_rate // 1000
+        self.kernels = kernels
+        self.conv_list = nn.ModuleList()
+        for k in range(1, kernels + 1):
+            conv_ks = k * self.base_ks
+            self.conv_list.append(
+                nn.Conv1d(1, self.base_ks // 2 + 1, conv_ks, stride=self.base_ks // 2, padding=conv_ks // 2, bias=bias)
+            )
+
+    def forward(self, x):
+        for i in range(self.kernels):
+            if i == 0:
+                emb = self.conv_list[i](x)
+            else:
+                emb = torch.cat([emb, self.conv_list[i](x)], dim=1)
+        return emb
 
 
 class UConvBlock(nn.Module):
@@ -332,8 +370,8 @@ class UConvBlock(nn.Module):
         for i in range(self.depth - 1):
             self.last_layer.append(LA(in_channels, in_channels, 5))
 
-        # 自适应权重
-        self.ada_global_weights = torch.nn.Parameter(torch.full((self.depth, ), 1/self.depth), requires_grad=True)
+        # # 自适应权重
+        # self.ada_global_weights = torch.nn.Parameter(torch.full((self.depth, ), 1/self.depth), requires_grad=True)
 
     def forward(self, x):
         """
@@ -356,12 +394,14 @@ class UConvBlock(nn.Module):
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
             ))
-        # global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]  # 原代码
-        global_f = self.globalatt(
-            sum(
-                w * rep * self.depth for w, rep in zip(torch.softmax(self.ada_global_weights, dim=0), global_f)
-            )
-        )
+
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]  # 原代码
+        # global_f = self.globalatt(
+        #     sum(
+        #         w * rep * self.depth for w, rep in zip(torch.softmax(self.ada_global_weights, dim=0), global_f)
+        #     )
+        # )
+
 
         x_fused = []
         # Gather them now in reverse order
@@ -539,10 +579,10 @@ if __name__ == '__main__':
         "feat_len": 3010
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
+    #
     # # TDANet测试
     # feat_len = 3010
-    # model = TDANet(sample_rate=sr, **model_configs).cuda()
+    # model = TDANetYang(sample_rate=sr, **model_configs).cuda()
     # x = torch.randn(1, 24000, dtype=torch.float32, device=device)
     # macs, params = profile(model, inputs=(x, ))
     # mb = 1024*1024
@@ -561,16 +601,16 @@ if __name__ == '__main__':
     # y = mudule(x)
     # print(y.shape)
 
-    # # UConvBlock——参数量测试
-    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
-    x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
-    macs, params = profile(model, inputs=(x,))
-    mb = 1024 * 1024
-    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_size=(1, 128, 2010), mode="train")
-    y = model(x)
-    print(y.shape)
+    # # # UConvBlock——参数量测试
+    # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    # x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x,))
+    # mb = 1024 * 1024
+    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_size=(1, 128, 2010), mode="train")
+    # y = model(x)
+    # print(y.shape)
 
     # # AdaLN测试
     # model = AdaLN(512, 256, 128).cuda()
@@ -600,3 +640,10 @@ if __name__ == '__main__':
     # y = model(x)
     # print(y.shape)
     # summary(model, input_size=(1, 128, feat_len), mode="train")
+
+
+    # # 多分辨率卷积编码器——测试
+    encoder = ConvEncoder(4, 8000, kernels=3).cuda()
+    x = torch.rand(1, 1, 24000, device=device)
+    emb = encoder(x)
+    print(emb.shape)

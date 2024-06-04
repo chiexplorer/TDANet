@@ -10,6 +10,7 @@ from .TDANet_best import TDANetBest
 from .TDANet_yang import TDANetYang
 from .SeBlock import SEBasicBlock1D
 from .TDANet_origin import TDANetOrigin
+from .TDANet_mult_tes import TDANetMultRes
 
 __all__ = [
     "BaseModel",
@@ -17,7 +18,8 @@ __all__ = [
     "TDANetBest",
     "SEBasicBlock1D",
     "TDANetYang",
-    "TDANetOrigin"
+    "TDANetOrigin",
+    "TDANetMultRes"
 ]
 
 
