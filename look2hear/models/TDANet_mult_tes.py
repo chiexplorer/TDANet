@@ -16,13 +16,14 @@ from look2hear.models.base_model import BaseModel
     多分辨率卷积卷积编码器
 '''
 
+
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
 
     shape = (x.shape[0],) + (1,) * (
-        x.ndim - 1
+            x.ndim - 1
     )  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()  # binarize
@@ -216,8 +217,8 @@ class PositionalEncoding(nn.Module):
         position = torch.arange(0, max_length).unsqueeze(1)
         div_term = torch.exp(
             (
-                torch.arange(0, in_channels, 2, dtype=torch.float)
-                * -(math.log(10000.0) / in_channels)
+                    torch.arange(0, in_channels, 2, dtype=torch.float)
+                    * -(math.log(10000.0) / in_channels)
             )
         )
         pe[:, 0::2] = torch.sin(position.float() * div_term)
@@ -249,8 +250,10 @@ class MultiHeadAttention(nn.Module):
         output = self.norm(output + self.dropout(output))
         return output.transpose(1, 2)
 
+
 class MultiHeadAttentionFixed(nn.Module):
     """ nn.MHA with batch_first=True """
+
     def __init__(self, in_channels, n_head, dropout, is_casual):
         super().__init__()
         self.pos_enc = PositionalEncoding(in_channels, 10000)
@@ -264,9 +267,10 @@ class MultiHeadAttentionFixed(nn.Module):
         x = x.transpose(1, 2)
         attns = None
         output = self.pos_enc(self.attn_in_norm(x))
-        output, _ = self.attn(output, output, output)
-        output = self.norm(output + self.dropout(output))
+        attn_output, _ = self.attn(output, output, output)
+        output = self.norm(output + self.dropout(attn_output))
         return output.transpose(1, 2)
+
 
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
@@ -309,16 +313,24 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
+
 class ConvEncoder(nn.Module):
-    def __init__(self, enc_kernel_size, sample_rate, kernels=3, bias=False):
+    def __init__(self, enc_kernel_size, out_channels, sample_rate, kernels=3, bias=False):
         super().__init__()
+        assert out_channels % kernels == 0, "Caution, out_channels must be divisible by kernels"
         self.base_ks = enc_kernel_size * sample_rate // 1000
+        self.out_channels = out_channels
         self.kernels = kernels
         self.conv_list = nn.ModuleList()
         for k in range(1, kernels + 1):
             conv_ks = k * self.base_ks
             self.conv_list.append(
-                nn.Conv1d(1, self.base_ks // 2 + 1, conv_ks, stride=self.base_ks // 4, padding=conv_ks // 2, bias=bias)
+                nn.Conv1d(1,
+                          self.out_channels // kernels,
+                          conv_ks,
+                          stride=self.base_ks // 4,
+                          padding=conv_ks // 2, bias=bias
+                          )
             )
 
     def forward(self, x):
@@ -405,7 +417,6 @@ class UConvBlock(nn.Module):
         #     )
         # )
 
-
         x_fused = []
         # Gather them now in reverse order
         for idx in range(self.depth):
@@ -443,16 +454,16 @@ class Recurrent(nn.Module):
 
 class TDANetMultRes(BaseModel):
     def __init__(
-        self,
-        out_channels=128,
-        in_channels=512,
-        num_blocks=16,
-        upsampling_depth=4,
-        enc_kernel_size=21,
-        num_sources=2,
-        sample_rate=16000,
-        feat_len=3010,
-        kernels=3
+            self,
+            out_channels=128,
+            in_channels=512,
+            num_blocks=16,
+            upsampling_depth=4,
+            enc_kernel_size=21,
+            num_sources=2,
+            sample_rate=16000,
+            feat_len=3010,
+            kernels=3
     ):
         super(TDANetMultRes, self).__init__(sample_rate=sample_rate)
 
@@ -480,25 +491,25 @@ class TDANetMultRes(BaseModel):
         #     padding=self.enc_kernel_size // 2,
         #     bias=False,
         # )
-        self.encoder = ConvEncoder(enc_kernel_size, sample_rate, kernels=kernels)
+        self.encoder = ConvEncoder(enc_kernel_size, out_channels, sample_rate, kernels=kernels)
         for block in self.encoder.conv_list:
             torch.nn.init.xavier_uniform_(block.weight)
 
         # Norm before the rest, and apply one more dense layer
-        self.ln = GlobLN(self.enc_num_basis*kernels)
-        self.bottleneck = nn.Conv1d(
-            in_channels=self.enc_num_basis*kernels, out_channels=out_channels, kernel_size=1
-        )
+        self.ln = GlobLN(out_channels)
+        # self.bottleneck = nn.Conv1d(
+        #     in_channels=out_channels, out_channels=out_channels, kernel_size=1
+        # )
 
         # Separation module
         self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
-        mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis*kernels, 1)
+        mask_conv = nn.Conv1d(out_channels, num_sources * out_channels, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
 
         # Back end
         self.decoder = nn.ConvTranspose1d(
-            in_channels=self.enc_num_basis*kernels * num_sources,
+            in_channels=out_channels * num_sources,
             out_channels=num_sources,
             kernel_size=self.enc_kernel_size,
             stride=self.enc_kernel_size // 4,
@@ -547,22 +558,22 @@ class TDANetMultRes(BaseModel):
         s = x.clone()
         # Separation module
         x = self.ln(x)
-        x = self.bottleneck(x)
+        # x = self.bottleneck(x)
         x = self.sm(x)
 
         x = self.mask_net(x)
-        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis*self.kernels, -1)
+        x = x.view(x.shape[0], self.num_sources, self.out_channels, -1)
         x = self.mask_nl_class(x)
         x = x * s.unsqueeze(1)
         # Back end
         estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))
         estimated_waveforms = estimated_waveforms[
-            :,
-            :,
-            self.enc_kernel_size
-            - self.enc_kernel_size
-            // 4 : -(rest + self.enc_kernel_size - self.enc_kernel_size // 4),
-        ].contiguous()
+                              :,
+                              :,
+                              self.enc_kernel_size
+                              - self.enc_kernel_size
+                              // 4: -(rest + self.enc_kernel_size - self.enc_kernel_size // 4),
+                              ].contiguous()
         if was_one_d:
             return estimated_waveforms.squeeze(0)
         return estimated_waveforms
@@ -575,6 +586,7 @@ class TDANetMultRes(BaseModel):
 if __name__ == '__main__':
     from thop import profile
     from torchinfo import summary
+
     sr = 8000
     model_configs = {
         "out_channels": 128,
@@ -583,7 +595,8 @@ if __name__ == '__main__':
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
-        "feat_len": 3010
+        "feat_len": 3010,
+        "kernels": 4
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -648,9 +661,8 @@ if __name__ == '__main__':
     # print(y.shape)
     # summary(model, input_size=(1, 128, feat_len), mode="train")
 
-
     # # # 多分辨率卷积编码器——测试
-    # encoder = ConvEncoder(4, 8000, kernels=3).cuda()
+    # encoder = ConvEncoder(4, model_configs["out_channels"], 8000, kernels=4).cuda()
     # x = torch.rand(1, 1, 24000, device=device)
     # emb = encoder(x)
     # print(emb.shape)

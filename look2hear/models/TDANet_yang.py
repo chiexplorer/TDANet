@@ -261,8 +261,8 @@ class MultiHeadAttentionFixed(nn.Module):
         x = x.transpose(1, 2)
         attns = None
         output = self.pos_enc(self.attn_in_norm(x))
-        output, _ = self.attn(output, output, output)
-        output = self.norm(output + self.dropout(output))
+        attn_output, _ = self.attn(output, output, output)
+        output = self.norm(output + self.dropout(attn_output))
         return output.transpose(1, 2)
 
 class GlobalAttention(nn.Module):
@@ -579,18 +579,18 @@ if __name__ == '__main__':
         "feat_len": 3010
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    #
-    # # TDANet测试
-    # feat_len = 3010
-    # model = TDANetYang(sample_rate=sr, **model_configs).cuda()
-    # x = torch.randn(1, 24000, dtype=torch.float32, device=device)
-    # macs, params = profile(model, inputs=(x, ))
-    # mb = 1024*1024
-    # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(model, input_size=(1, 24000), mode="train")
-    # y = model(x)
-    # print(y.shape)
+
+    # TDANet测试
+    feat_len = 3010
+    model = TDANetYang(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x, ))
+    mb = 1024*1024
+    print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 24000), mode="train")
+    y = model(x)
+    print(y.shape)
 
     # # DialateConvNorm——任意shape输入测试
     # in_channels = 512
@@ -641,9 +641,9 @@ if __name__ == '__main__':
     # print(y.shape)
     # summary(model, input_size=(1, 128, feat_len), mode="train")
 
-
-    # # 多分辨率卷积编码器——测试
-    encoder = ConvEncoder(4, 8000, kernels=3).cuda()
-    x = torch.rand(1, 1, 24000, device=device)
-    emb = encoder(x)
-    print(emb.shape)
+    #
+    # # # 多分辨率卷积编码器——测试
+    # encoder = ConvEncoder(4, 8000, kernels=3).cuda()
+    # x = torch.rand(1, 1, 24000, device=device)
+    # emb = encoder(x)
+    # print(emb.shape)
