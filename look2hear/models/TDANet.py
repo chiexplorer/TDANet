@@ -187,6 +187,46 @@ class DilatedConvNorm(nn.Module):
         output = self.conv(input)
         return self.norm(output)
 
+class DilatedSeparableConvNorm(nn.Module):
+    """
+    This class defines the separabal dilated convolution with normalized output.
+    """
+
+    def __init__(self, nIn, nOut, kSize, stride=1, d=1, groups=1):
+        """
+        :param nIn: number of input channels
+        :param nOut: number of output channels
+        :param kSize: kernel size
+        :param stride: optional stride rate for down-sampling
+        :param d: optional dilation rate
+        """
+        super().__init__()
+        self.dw_conv = nn.Conv1d(
+            nIn,
+            nOut,
+            kSize,
+            stride=stride,
+            dilation=d,
+            padding=((kSize - 1) // 2) * d,
+            groups=groups,
+        )
+        self.pw_conv = nn.Conv1d(
+            nIn,
+            nOut,
+            1,
+            stride=1,
+            dilation=1,
+            padding=0,
+            groups=1,
+        )
+        # self.norm = nn.GroupNorm(1, nOut, eps=1e-08)
+        self.norm = GlobLN(nOut)
+
+    def forward(self, input):
+        output = self.dw_conv(input)
+        output = self.pw_conv(output)
+        return self.norm(output)
+
 class SAM1D(nn.Module):
     def __init__(self, dim, ca_num_heads=4, sa_num_heads=8, qkv_bias=False, qk_scale=None,
                  attn_drop=0., proj_drop=0., ca_attention=1, expand_ratio=2):
@@ -485,12 +525,12 @@ class UConvBlock(nn.Module):
         # self.attn_up.append(LinearAttention(in_channels, 4))
 
         # # 卷积替换avg pooling改版
-        # self.conv_pool = nn.ModuleList()
-        # self.conv_pool.append(
-        #     DilatedConv(
-        #         in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
-        #     )
-        # )
+        self.conv_pool = nn.ModuleList()
+        self.conv_pool.append(
+            DilatedSeparableConvNorm(
+                in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
+            )
+        )
 
 
         for i in range(1, upsampling_depth):
@@ -516,17 +556,17 @@ class UConvBlock(nn.Module):
             # self.attn_up.append(
             #     LinearAttention(in_channels, 4)
             # )
-            # # 卷积替换avg pooling改版
-            # self.conv_pool.append(
-            #     DilatedConv(
-            #         in_channels,
-            #         in_channels,
-            #         kSize=2 * conv_stride + 1,
-            #         stride=conv_stride,
-            #         groups=in_channels,
-            #         d=1,
-            #     )
-            # )
+            # 卷积替换avg pooling改版
+            self.conv_pool.append(
+                DilatedSeparableConvNorm(
+                    in_channels,
+                    in_channels,
+                    kSize=2 * conv_stride + 1,
+                    stride=conv_stride,
+                    groups=in_channels,
+                    d=1,
+                )
+            )
 
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
         # self.sam_block = SAM1D(dim=in_channels, ca_num_heads=4, ca_attention=1, proj_drop=0.0, sa_num_heads=8, expand_ratio=2)
@@ -561,20 +601,20 @@ class UConvBlock(nn.Module):
             out_k = self.spp_dw[k](output[-1])  # 原实现
             output.append(out_k)
 
-        # # 卷积替换avg pooling改版
-        # conv_output = []
-        # for k, fea in enumerate(output):
-        #     conv_out_k = self.conv_pool[self.depth - k - 1](fea)
-        #     conv_output.append(conv_out_k)
+        # 卷积替换avg pooling改版
+        conv_output = []
+        for k, fea in enumerate(output):
+            conv_out_k = self.conv_pool[self.depth - k - 1](fea)
+            conv_output.append(conv_out_k)
 
         # global features
         global_f = []
-        for fea in output:
-            global_f.append(F.adaptive_avg_pool1d(
-                fea, output_size=output[-1].shape[-1]
-            ))  # [B, Cin, T/2^S]
-            # # 卷积替换avg pooling改版
-            # global_f.append(fea)  # [B, Cin, T/2^S]
+        for fea in conv_output:
+            # global_f.append(F.adaptive_avg_pool1d(
+            #     fea, output_size=output[-1].shape[-1]
+            # ))  # [B, Cin, T/2^S]
+            # 卷积替换avg pooling改版
+            global_f.append(fea)  # [B, Cin, T/2^S]
         # global_f = self.sam_block(torch.stack(global_f, dim=1).sum(1))  # SAM替换MHSA
         # global_f = self.globalatt(global_f)
         global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, Cin, T/2^S]  # 原代码
@@ -888,17 +928,17 @@ if __name__ == '__main__':
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # # TDANet测试
-    # feat_len = 3010
-    # model = TDANet(sample_rate=sr, **model_configs).cuda()
-    # x = torch.randn(1, 24000, dtype=torch.float32, device=device)
-    # macs, params = profile(model, inputs=(x, ))
-    # mb = 1024*1024
-    # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(model, input_size=(1, 24000), mode="train")
-    # y = model(x)
-    # print(y.shape)
+    # TDANet测试
+    feat_len = 3010
+    model = TDANet(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x, ))
+    mb = 1024*1024
+    print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 24000), mode="train")
+    y = model(x)
+    print(y.shape)
 
     # # DialateConvNorm——任意shape输入测试
     # in_channels = 512
@@ -941,10 +981,10 @@ if __name__ == '__main__':
     # print(y.shape)
     # summary(model, input_size=(1, 128, feat_len), mode="train")
 
-    # GlobalAttention——测试
-    feat_len = 377
-    model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
-    x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
-    y = model(x)
-    print(y.shape)
-    summary(model, input_size=(1, 128, feat_len), mode="train")
+    # # GlobalAttention——测试
+    # feat_len = 377
+    # model = GlobalAttention(in_chan=128, out_chan=128, drop_path=0.1).to(device)
+    # x = torch.rand(1, 128, feat_len, dtype=torch.float32, device=device)
+    # y = model(x)
+    # print(y.shape)
+    # summary(model, input_size=(1, 128, feat_len), mode="train")
