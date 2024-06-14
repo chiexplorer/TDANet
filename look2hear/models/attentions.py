@@ -126,6 +126,53 @@ class CrossAttention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
         return self.to_out(out)
 
+class CrossAttentionConv(nn.Module):
+    """ 轻量化的基础注意力模块，支持子注意力或互注意力 """
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=32, dropout=0.):
+        super().__init__()
+        inner_dim = dim_head * heads
+        context_dim = default(context_dim, query_dim)
+
+        self.scale = dim_head ** -0.5
+        self.heads = heads
+
+        self.to_q = nn.Conv1d(query_dim, inner_dim, kernel_size=1, bias=False)
+        self.to_k = nn.Conv1d(context_dim, inner_dim, kernel_size=1, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Conv1d(inner_dim, query_dim, kernel_size=1),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x, context=None, mask=None):
+        h = self.heads
+
+        q = self.to_q(x.transpose(1, 2))
+        q = q.transpose(1, 2)
+        context = default(context, x)
+        k = self.to_k(context.transpose(1, 2))
+        k = k.transpose(1, 2)
+        v = self.to_v(context)
+
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+
+        sim = torch.einsum('b i d, b j d -> b i j', q, k) * self.scale
+
+        if exists(mask):
+            mask = rearrange(mask, 'b ... -> b (...)')
+            max_neg_value = -torch.finfo(sim.dtype).max
+            mask = repeat(mask, 'b j -> (b h) () j', h=h)
+            sim.masked_fill_(~mask, max_neg_value)
+
+        # attention, what we cannot get enough of
+        attn = sim.softmax(dim=-1)
+
+        out = torch.einsum('b i j, b j d -> b i d', attn, v)
+        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        out = self.to_out(out.transpose(1, 2))
+        return out.transpose(1, 2)
+
 class MHAConv(nn.Module):
     def __init__(self, in_channels, n_head, dropout, is_casual):
         super().__init__()
@@ -162,13 +209,37 @@ if __name__ == '__main__':
     # print("模型参数量详情：")
     # summary(module, input_size=(1, 128, 2010), mode="train")
 
-    # # 常规注意力
-    module = MultiHeadAttention(128, 4).cuda()
-    x = torch.rand(1, 128, 2010, device=device)
-    y = module(x)
-    print(y.shape)
-    macs, params = profile(module, inputs=(x,))
-    mb = 1024 * 1024
-    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # # # 常规注意力
+    # module = MultiHeadAttention(128, 4).cuda()
+    # x = torch.rand(1, 128, 2010, device=device)
+    # y = module(x)
+    # print(y.shape)
+    # macs, params = profile(module, inputs=(x,))
+    # mb = 1024 * 1024
+    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_size=(1, 128, 2010), mode="train")
+
+    # # # 常规注意力
+    # module = MultiHeadAttention(128, 4).cuda()
+    # x = torch.rand(1, 128, 2010, device=device)
+    # y = module(x)
+    # print(y.shape)
+    # macs, params = profile(module, inputs=(x,))
+    # mb = 1024 * 1024
+    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_size=(1, 128, 2010), mode="train")
+
+    # # 轻量化CrossAttention测试
+    module = CrossAttentionConv(3010, 388).cuda()
+    x = torch.rand(1, 128, 3010, device=device)
+    context = torch.rand(1, 128, 388, device=device)
+    y = module(x, context)
+    macs, params = profile(module, inputs=(x, context))
+    mb = 1000*1000
+    print(f"MACs: [{macs/mb/1000}] G \nParams: [{params/mb}] M")
     print("模型参数量详情：")
-    summary(module, input_size=(1, 128, 2010), mode="train")
+    summary(module, input_size=((1, 128, 3010), (1, 128, 388)), mode="train")
+
+    print(y.shape)

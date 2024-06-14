@@ -268,7 +268,7 @@ class MultiHeadAttentionFixed(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        self.attn = MultiHeadAttentionFixed(out_chan, 8, 0.1, False)
+        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -583,12 +583,12 @@ if __name__ == '__main__':
     # TDANet测试
     feat_len = 3010
     model = TDANetYang(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    x = torch.randn(8, 24000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1024*1024
     print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
-    summary(model, input_size=(1, 24000), mode="train")
+    summary(model, input_size=(8, 24000), mode="train")
     y = model(x)
     print(y.shape)
 

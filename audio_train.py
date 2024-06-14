@@ -34,6 +34,7 @@ from look2hear.utils import print_only, MyRichProgressBar, RichProgressBarTheme
 
 import warnings
 from thop import profile
+from pytorch_lightning.profilers import AdvancedProfiler
 
 warnings.filterwarnings("ignore")
 
@@ -152,7 +153,7 @@ def main(config):
     )
     callbacks.append(checkpoint)
 
-    if config["training"]["early_stop"]:
+    if "early_stop" in config["training"] and config["training"]["early_stop"]:
         print_only("Instantiating EarlyStopping")
         callbacks.append(EarlyStopping(**config["training"]["early_stop"]))
     # callbacks.append(MyRichProgressBar(theme=RichProgressBarTheme()))
@@ -179,8 +180,10 @@ def main(config):
             version=config["exp"]["version"] if wandb_version_available else None
     )
     print_only(f"Training with precision [{ config['training']['precision'] if 'precision' in config['training'] else 32 }]")
+    # profiler = AdvancedProfiler(dirpath=r"tests\files", filename="perf_logs_bad")  # 高级性能分析器
     # accelerator=distributed_backend,
     # strategy=DDPStrategy(find_unused_parameters=True),  # 取消分布式
+    # #  profiler="advanced",
     trainer = pl.Trainer(
         max_epochs=config["training"]["epochs"],
         callbacks=callbacks,
@@ -191,6 +194,7 @@ def main(config):
         logger=comet_logger,
         sync_batchnorm=True,
         precision=config["training"]["precision"] if 'precision' in config["training"] else 32,  # 若配置了precision，则应用
+
         # num_sanity_val_steps=0,
         # sync_batchnorm=True,
         # fast_dev_run=True,

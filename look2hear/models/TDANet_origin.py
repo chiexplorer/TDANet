@@ -518,13 +518,14 @@ class TDANetOrigin(BaseModel):
 
 
 if __name__ == '__main__':
+    import time
     from thop import profile
     from torchinfo import summary
     sr = 8000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
-        "num_blocks": 16,
+        "num_blocks": 8,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
@@ -537,12 +538,13 @@ if __name__ == '__main__':
     model = TDANetOrigin(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, 24000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
-    mb = 1024*1024
-    print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    mb = 1000*1000
+    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
     summary(model, input_size=(1, 24000), mode="train")
+    start_time = time.time()
     y = model(x)
-    print(y.shape)
+    print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)
 
     # # # UConvBlock——参数量测试
     # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()

@@ -385,7 +385,7 @@ class MultiHeadAttention(nn.Module):
         output = self.pos_enc(self.attn_in_norm(x))
         output, _ = self.attn(output, output, output)  # 原代码
         output = self.norm(output + self.dropout(output))  # 原代码 错误的残差连接方式
-        # output = self.norm(self.dropout(output))  # 修正(1) 去掉output的自加
+        # output = self.norm(self.dropout(output))  # 修正(1) 去掉output的自加`
         # # 修改代码(2)
         # attn_output, _ = self.attn(output, output, output)
         # attn_output = self.norm(output + attn_output)  # 残差连接
@@ -917,6 +917,7 @@ if __name__ == '__main__':
     from thop import profile
     from torchinfo import summary
     sr = 8000
+    sample_len = 24000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -928,17 +929,17 @@ if __name__ == '__main__':
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # TDANet测试
-    feat_len = 3010
-    model = TDANet(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
-    macs, params = profile(model, inputs=(x, ))
-    mb = 1024*1024
-    print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_size=(1, 24000), mode="train")
-    y = model(x)
-    print(y.shape)
+    # # TDANet测试
+    # feat_len = 3010
+    # model = TDANet(sample_rate=sr, **model_configs).cuda()
+    # x = torch.randn(1, sample_len, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x, ))
+    # mb = 1024*1024
+    # print(f"MACs: [{macs/mb/1024}] Gb \nParams: [{params/mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_size=(1, sample_len), mode="train")
+    # y = model(x)
+    # print(y.shape)
 
     # # DialateConvNorm——任意shape输入测试
     # in_channels = 512
@@ -949,16 +950,16 @@ if __name__ == '__main__':
     # y = mudule(x)
     # print(y.shape)
 
-    # # # UConvBlock——参数量测试
-    # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
-    # x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
-    # macs, params = profile(model, inputs=(x,))
-    # mb = 1024 * 1024
-    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(model, input_size=(1, 128, 2010), mode="train")
-    # y = model(x)
-    # print(y.shape)
+    # # UConvBlock——参数量测试
+    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x,))
+    mb = 1024 * 1024
+    print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 128, 2010), mode="train")
+    y = model(x)
+    print(y.shape)
 
     # # AdaLN测试
     # model = AdaLN(512, 256, 128).cuda()

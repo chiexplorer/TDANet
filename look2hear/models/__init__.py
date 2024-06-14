@@ -11,6 +11,8 @@ from .TDANet_yang import TDANetYang
 from .SeBlock import SEBasicBlock1D
 from .TDANet_origin import TDANetOrigin
 from .TDANet_mult_tes import TDANetMultRes
+from .TDANet_attn import TDANetAttn
+from .TDANet_chunk import TDANetChunk
 
 __all__ = [
     "BaseModel",
@@ -19,7 +21,9 @@ __all__ = [
     "SEBasicBlock1D",
     "TDANetYang",
     "TDANetOrigin",
-    "TDANetMultRes"
+    "TDANetMultRes",
+    "TDANetAttn",
+    "TDANetChunk"
 ]
 
 
