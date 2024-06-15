@@ -10,26 +10,26 @@ from timm.models.layers import DropPath, to_2tuple
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from look2hear.models.TDANet_origin import GlobLN
 
-
-try:
-    from mmseg.models.builder import BACKBONES as seg_BACKBONES
-    from mmseg.utils import get_root_logger
-    from mmcv.runner import _load_checkpoint
-
-    has_mmseg = True
-except ImportError:
-    print("If for semantic segmentation, please install mmsegmentation first")
-    has_mmseg = False
-
-try:
-    from mmdet.models.builder import BACKBONES as det_BACKBONES
-    from mmdet.utils import get_root_logger
-    from mmcv.runner import _load_checkpoint
-
-    has_mmdet = True
-except ImportError:
-    print("If for detection, please install mmdetection first")
-    has_mmdet = False
+#
+# try:
+#     from mmseg.models.builder import BACKBONES as seg_BACKBONES
+#     from mmseg.utils import get_root_logger
+#     from mmcv.runner import _load_checkpoint
+#
+#     has_mmseg = True
+# except ImportError:
+#     print("If for semantic segmentation, please install mmsegmentation first")
+#     has_mmseg = False
+#
+# try:
+#     from mmdet.models.builder import BACKBONES as det_BACKBONES
+#     from mmdet.utils import get_root_logger
+#     from mmcv.runner import _load_checkpoint
+#
+#     has_mmdet = True
+# except ImportError:
+#     print("If for detection, please install mmdetection first")
+#     has_mmdet = False
 
 
 def build_norm_layer(norm_cfg, num_features):
@@ -450,6 +450,40 @@ class HybridTokenMixer(nn.Module):  ### D-Mixer
         x = self.proj(x) + x  ## STE
         return x
 
+class HybridTokenMixer1D(nn.Module):  ### D-Mixer 1D
+    def __init__(self,
+                 dim,
+                 kernel_size=3,
+                 num_groups=2,
+                 num_heads=1,
+                 sr_ratio=1,
+                 reduction_ratio=8):
+        super().__init__()
+        assert dim % 2 == 0, f"dim {dim} should be divided by 2."
+
+        self.local_unit = DynamicConv1d(
+            dim=dim // 2, kernel_size=kernel_size, num_groups=num_groups)
+        self.global_unit = Attention1D(
+            dim=dim // 2, num_heads=num_heads, sr_ratio=sr_ratio)
+
+        inner_dim = max(16, dim // reduction_ratio)
+        self.proj = nn.Sequential(
+            nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim),
+            nn.GELU(),
+            nn.GroupNorm(1, dim),
+            nn.Conv1d(dim, inner_dim, kernel_size=1),
+            nn.GELU(),
+            nn.GroupNorm(1, inner_dim),
+            nn.Conv1d(inner_dim, dim, kernel_size=1),
+            nn.GroupNorm(1, dim), )
+
+    def forward(self, x, relative_pos_enc=None):
+        x1, x2 = torch.chunk(x, chunks=2, dim=1)
+        x1 = self.local_unit(x1)  # IDConv
+        x2 = self.global_unit(x2, relative_pos_enc)  # OSRA
+        x = torch.cat([x1, x2], dim=1)
+        x = self.proj(x) + x  ## STE
+        return x
 
 class MultiScaleDWConv(nn.Module):
     def __init__(self, dim, scale=(1, 3, 5, 7)):
@@ -638,6 +672,16 @@ class LayerScale(nn.Module):
         x = F.conv2d(x, weight=self.weight, bias=self.bias, groups=x.shape[1])
         return x
 
+class LayerScale1D(nn.Module):
+    def __init__(self, dim, init_value=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim, 1, 1) * init_value,
+                                   requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(dim), requires_grad=True)
+
+    def forward(self, x):
+        x = F.conv1d(x, weight=self.weight, bias=self.bias, groups=x.shape[1])
+        return x
 
 class Block(nn.Module):
     """
@@ -702,6 +746,81 @@ class Block(nn.Module):
         x = x + self.pos_embed(x)
         x = x + self.drop_path(self.layer_scale_1(
             self.token_mixer(self.norm1(x), relative_pos_enc)))
+        x = x + self.drop_path(self.layer_scale_2(self.mlp(self.norm2(x))))
+        return x
+
+    def forward(self, x, relative_pos_enc=None):
+        if self.grad_checkpoint and x.requires_grad:
+            x = checkpoint.checkpoint(self._forward_impl, x, relative_pos_enc)
+        else:
+            x = self._forward_impl(x, relative_pos_enc)
+        return x
+
+class Block1D(nn.Module):
+    """
+    Network Block.
+    Args:
+        dim (int): Embedding dim.
+        kernel_size (int): kernel size of dynamic conv. Defaults to 3.
+        num_groups (int): num_groups of dynamic conv. Defaults to 2.
+        num_heads (int): num_groups of self-attention. Defaults to 1.
+        mlp_ratio (float): Mlp expansion ratio. Defaults to 4.
+        norm_cfg (dict): The config dict for norm layers.
+            Defaults to ``dict(type='GN', num_groups=1)``.
+        act_cfg (dict): The config dict for activation between pointwise
+            convolution. Defaults to ``dict(type='GELU')``.
+        drop (float): Dropout rate. Defaults to 0.
+        drop_path (float): Stochastic depth rate. Defaults to 0.
+        layer_scale_init_value (float): Init value for Layer Scale.
+            Defaults to 1e-5.
+    """
+
+    def __init__(self,
+                 dim=64,
+                 kernel_size=3,
+                 sr_ratio=1,
+                 num_groups=2,
+                 num_heads=1,
+                 mlp_ratio=4,
+                 norm_cfg=dict(type='GN', num_groups=1),
+                 act_cfg=dict(type='ReLU'),
+                 drop=0,
+                 drop_path=0,
+                 layer_scale_init_value=1e-5,
+                 grad_checkpoint=False):
+
+        super().__init__()
+        self.grad_checkpoint = grad_checkpoint
+        mlp_hidden_dim = int(dim * mlp_ratio)
+
+        self.pos_embed = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm1 = GlobLN(dim)
+        # self.norm1 = build_norm_layer(norm_cfg, dim)
+        self.token_mixer = HybridTokenMixer1D(dim,
+                                            kernel_size=kernel_size,
+                                            num_groups=num_groups,
+                                            num_heads=num_heads,
+                                            sr_ratio=sr_ratio)
+        self.norm2 = GlobLN(dim)
+        # self.norm2 = build_norm_layer(norm_cfg, dim)
+        self.mlp = Mlp1D(in_features=dim,
+                       hidden_features=mlp_hidden_dim,
+                       act_cfg=act_cfg,
+                       drop=drop,)
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
+
+        if layer_scale_init_value is not None:
+            self.layer_scale_1 = LayerScale1D(dim, layer_scale_init_value)
+            self.layer_scale_2 = LayerScale1D(dim, layer_scale_init_value)
+        else:
+            self.layer_scale_1 = nn.Identity()
+            self.layer_scale_2 = nn.Identity()
+
+    def _forward_impl(self, x, relative_pos_enc=None):
+        x = x + self.pos_embed(x)
+        x = x + self.drop_path(self.layer_scale_1(
+                self.token_mixer(self.norm1(x), relative_pos_enc)))
         x = x + self.drop_path(self.layer_scale_2(self.mlp(self.norm2(x))))
         return x
 
@@ -1151,17 +1270,17 @@ if __name__ == '__main__':
     # y = module(x)
     # print(y.shape)
 
-    # IDConv 1D形式
-    module = DynamicConv1d(64, 3, 4, 2, stride=2, bias=False).cuda()
-    # module = nn.Conv2d(64, 64, 3, padding=1, groups=64).cuda()
-    x = torch.rand(1, 64, 1500, device=device)
-    macs, params = profile(module, inputs=(x,))
-    mb = 1000 * 1000
-    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    print("模型参数量详情：")
-    summary(module, input_size=(1, 64, 1500), mode="train")
-    y = module(x)
-    print(y.shape)
+    # # IDConv 1D形式
+    # module = DynamicConv1d(64, 3, 4, 2, stride=2, bias=False).cuda()
+    # # module = nn.Conv2d(64, 64, 3, padding=1, groups=64).cuda()
+    # x = torch.rand(1, 64, 1500, device=device)
+    # macs, params = profile(module, inputs=(x,))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_size=(1, 64, 1500), mode="train")
+    # y = module(x)
+    # print(y.shape)
 
     # # OSRA测试
     # dim = 64
@@ -1226,4 +1345,27 @@ if __name__ == '__main__':
     # summary(module, input_size=(1, 64, 1500), mode="train")
     # y = module(x)
     # print(y.shape)
+
+    # # Block 1D 测试
+    block = Block1D(
+        64,
+        kernel_size=3,
+        num_groups=2,
+        num_heads=1,
+        sr_ratio=1,
+        mlp_ratio=4,
+        norm_cfg=dict(type='GN', num_groups=1),
+        act_cfg=dict(type='GELU'),
+        drop=0,
+        drop_path=0,
+        layer_scale_init_value=1e-5,
+        grad_checkpoint=False).cuda()
+    x = torch.rand(1, 64, 1500, device=device)
+    y = block(x)
+    macs, params = profile(block, inputs=(x, ))
+    mb = 1000*1000
+    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
+    print("模型参数量详情：")
+    summary(block, input_size=(1, 64, 1500), mode="train")
+    print(y.shape)
 

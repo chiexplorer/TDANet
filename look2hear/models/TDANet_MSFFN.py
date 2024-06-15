@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.TransXNet import Mlp1D
+from look2hear.models.TransXNet import Mlp1D, Block1D
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -27,6 +27,15 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     output = x.div(keep_prob) * random_tensor
     return output
 
+def get_feat_len(feat_len, depth):
+    """ get feature length after [depth-1] times downsample """
+    feat_len_tmp = feat_len
+    feat_lens = [feat_len]
+    for i in range(depth - 1):
+        feat_len_tmp = (feat_len_tmp + 1) // 2
+        feat_lens.append(feat_len_tmp)
+    feat_lens.reverse()  # 翻转
+    return feat_len_tmp
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -251,13 +260,13 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        self.attn = MultiHeadAttention(out_chan, 8, 0., False)
-        # self.mlp = Mlp(out_chan, out_chan * 2, drop=0.)
-        self.mlp = Mlp1D(out_chan, None, None, act_cfg=dict(type='ReLU'))
+        # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
+        # self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
+        self.mlp = Mlp1D(out_chan, out_chan * 2, None, act_cfg=dict(type='ReLU'), drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        x = x + self.drop_path(self.attn(x))
+        # x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -298,10 +307,12 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
+        assert feat_len is not None, "Fool, you need to provide the feature length!"
+        self.feat_len = feat_len
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
             DilatedConvNorm(
@@ -327,9 +338,31 @@ class UConvBlock(nn.Module):
 
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
-        self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.
+        # self.globalatt = GlobalAttention(
+        #     in_channels * upsampling_depth, in_channels, 0.1
+        # )
+        # 写死的超参
+        num_heads = 4
+        sr_ratio = 4
+        self.globalatt = Block1D(
+            in_channels,
+            kernel_size=3,
+            num_groups=2,
+            num_heads=num_heads,
+            sr_ratio=sr_ratio,
+            mlp_ratio=4,
+            norm_cfg=dict(type='GN', num_groups=1),
+            act_cfg=dict(type='ReLU'),
+            drop=0.1,
+            drop_path=0.1,
+            layer_scale_init_value=1e-5,
+            grad_checkpoint=False
         )
+        # RPE
+        num_patches = get_feat_len(self.feat_len, self.depth)
+        sr_patches = math.ceil(num_patches / sr_ratio)
+        self.relative_pos_enc = nn.Parameter(torch.zeros(1, num_heads, num_patches, sr_patches), requires_grad=True)
+
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
             self.last_layer.append(LA(in_channels, in_channels, 5))
@@ -355,7 +388,8 @@ class UConvBlock(nn.Module):
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
             ))
-        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
+        # global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1), self.relative_pos_enc)  # TransXNet版
 
         x_fused = []
         # Gather them now in reverse order
@@ -373,9 +407,9 @@ class UConvBlock(nn.Module):
 
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len=feat_len)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -392,7 +426,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetOrigin(BaseModel):
+class TDANetMSFFN(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -404,7 +438,7 @@ class TDANetOrigin(BaseModel):
         sample_rate=16000,
         feat_len=3010
     ):
-        super(TDANetOrigin, self).__init__(sample_rate=sample_rate)
+        super(TDANetMSFFN, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -438,7 +472,7 @@ class TDANetOrigin(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
+        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -537,7 +571,7 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetOrigin(sample_rate=sr, **model_configs).cuda()
+    model = TDANetMSFFN(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, 24000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000

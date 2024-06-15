@@ -533,26 +533,26 @@ if __name__ == '__main__':
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # TDANet测试
-    feat_len = 3010
-    model = TDANetOrigin(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
-    macs, params = profile(model, inputs=(x, ))
-    mb = 1000*1000
-    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_size=(1, 24000), mode="train")
-    start_time = time.time()
-    y = model(x)
-    print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)
-
-    # # # UConvBlock——参数量测试
-    # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
-    # x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
-    # macs, params = profile(model, inputs=(x,))
-    # mb = 1024 * 1024
-    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # # TDANet测试
+    # feat_len = 3010
+    # model = TDANetOrigin(sample_rate=sr, **model_configs).cuda()
+    # x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    # macs, params = profile(model, inputs=(x, ))
+    # mb = 1000*1000
+    # print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
     # print("模型参数量详情：")
-    # summary(model, input_size=(1, 128, 2010), mode="train")
+    # summary(model, input_size=(1, 24000), mode="train")
+    # start_time = time.time()
     # y = model(x)
-    # print(y.shape)
+    # print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)
+
+    # # UConvBlock——参数量测试
+    model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
+    x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
+    macs, params = profile(model, inputs=(x,))
+    mb = 1000*1000
+    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_size=(1, 128, 2010), mode="train")
+    y = model(x)
+    print(y.shape)
