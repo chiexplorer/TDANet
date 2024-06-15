@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
+from look2hear.models.TransXNet import Mlp1D
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -250,8 +251,9 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
+        self.attn = MultiHeadAttention(out_chan, 8, 0., False)
+        # self.mlp = Mlp(out_chan, out_chan * 2, drop=0.)
+        self.mlp = Mlp1D(out_chan, None, None, act_cfg=dict(type='ReLU'))
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
@@ -326,7 +328,7 @@ class UConvBlock(nn.Module):
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
         self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.1
+            in_channels * upsampling_depth, in_channels, 0.
         )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
@@ -390,7 +392,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetChunk(BaseModel):
+class TDANetOrigin(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -400,10 +402,9 @@ class TDANetChunk(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
-        feat_len=3010,
-        n_chunk=32,
+        feat_len=3010
     ):
-        super(TDANetChunk, self).__init__(sample_rate=sample_rate)
+        super(TDANetOrigin, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -413,7 +414,6 @@ class TDANetChunk(BaseModel):
         self.enc_kernel_size = enc_kernel_size * sample_rate // 1000
         self.enc_num_basis = self.enc_kernel_size // 2 + 1
         self.num_sources = num_sources
-        self.n_chunk = n_chunk
 
         # Appropriate padding is needed for arbitrary lengths
         self.lcm = abs(
@@ -432,15 +432,15 @@ class TDANetChunk(BaseModel):
         torch.nn.init.xavier_uniform_(self.encoder.weight)
 
         # Norm before the rest, and apply one more dense layer
-        self.ln = GlobLN(self.n_chunk)
+        self.ln = GlobLN(self.enc_num_basis)
         self.bottleneck = nn.Conv1d(
-            in_channels=self.n_chunk, out_channels=out_channels, kernel_size=1
+            in_channels=self.enc_num_basis, out_channels=out_channels, kernel_size=1
         )
 
         # Separation module
         self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
-        mask_conv = nn.Conv1d(out_channels, num_sources * self.n_chunk, 1)
+        mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
 
         # Back end
@@ -483,8 +483,12 @@ class TDANetChunk(BaseModel):
             input_wav = input_wav
         if input_wav.ndim == 3:
             input_wav = input_wav.squeeze(1)
-        # front end, chunk输入为(n_chunk, K)
-        x = input_wav.view(input_wav.shape[0], self.n_chunk, -1)
+
+        x, rest = self.pad_input(
+            input_wav, self.enc_kernel_size, self.enc_kernel_size // 4
+        )
+        # Front end
+        x = self.encoder(x.unsqueeze(1))
 
         # Split paths
         s = x.clone()
@@ -494,23 +498,21 @@ class TDANetChunk(BaseModel):
         x = self.sm(x)
 
         x = self.mask_net(x)
-        x = x.view(x.shape[0], self.num_sources, self.n_chunk, -1)
+        x = x.view(x.shape[0], self.num_sources, self.enc_num_basis, -1)
         x = self.mask_nl_class(x)
         x = x * s.unsqueeze(1)
-        return x.contiguous().view(x.shape[0], self.num_sources, -1)
-        # # Back end
-
-        # estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))
-        # estimated_waveforms = estimated_waveforms[
-        #     :,
-        #     :,
-        #     self.enc_kernel_size
-        #     - self.enc_kernel_size
-        #     // 4 : -(rest + self.enc_kernel_size - self.enc_kernel_size // 4),
-        # ].contiguous()
-        # if was_one_d:
-        #     return estimated_waveforms.squeeze(0)
-        # return estimated_waveforms
+        # Back end
+        estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))
+        estimated_waveforms = estimated_waveforms[
+            :,
+            :,
+            self.enc_kernel_size
+            - self.enc_kernel_size
+            // 4 : -(rest + self.enc_kernel_size - self.enc_kernel_size // 4),
+        ].contiguous()
+        if was_one_d:
+            return estimated_waveforms.squeeze(0)
+        return estimated_waveforms
 
     def get_model_args(self):
         model_args = {"n_src": 2}
@@ -529,14 +531,13 @@ if __name__ == '__main__':
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
-        "feat_len": 3010,
-        "n_chunk": 16,
+        "feat_len": 3010
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetChunk(sample_rate=sr, **model_configs).cuda()
+    model = TDANetOrigin(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, 24000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
@@ -551,8 +552,8 @@ if __name__ == '__main__':
     # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
     # x = torch.rand(1, 128, 2010, dtype=torch.float32, device=device)
     # macs, params = profile(model, inputs=(x,))
-    # mb = 1024 * 1024
-    # print(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    # mb = 1000*1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
     # print("模型参数量详情：")
     # summary(model, input_size=(1, 128, 2010), mode="train")
     # y = model(x)
