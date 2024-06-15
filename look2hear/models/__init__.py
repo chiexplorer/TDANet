@@ -13,6 +13,8 @@ from .TDANet_origin import TDANetOrigin
 from .TDANet_mult_tes import TDANetMultRes
 from .TDANet_attn import TDANetAttn
 from .TDANet_chunk import TDANetChunk
+from .TDANet_transxnet import TDANetTranXNet
+from .TDANet_MSFFN import TDANetMSFFN
 
 __all__ = [
     "BaseModel",
@@ -23,7 +25,9 @@ __all__ = [
     "TDANetOrigin",
     "TDANetMultRes",
     "TDANetAttn",
-    "TDANetChunk"
+    "TDANetChunk",
+    "TDANetTranXNet",
+    "TDANetMSFFN"
 ]
 
 

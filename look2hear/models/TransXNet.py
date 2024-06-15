@@ -608,8 +608,8 @@ class Mlp1D(nn.Module):  ### MS-FFN 1D
 
         self.norm = GlobLN(hidden_features)
         self.fc2 = nn.Sequential(
-            nn.Conv1d(hidden_features, in_features, kernel_size=1, bias=False),
-            GlobLN(hidden_features),
+            nn.Conv1d(hidden_features, out_features, kernel_size=1, bias=False),
+            GlobLN(out_features),
         )
         self.drop = nn.Dropout(drop)
 

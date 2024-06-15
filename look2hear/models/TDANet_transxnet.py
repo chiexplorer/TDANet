@@ -251,8 +251,8 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        self.attn = MultiHeadAttention(out_chan, 8, 0., False)
-        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.)
+        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
+        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
@@ -337,7 +337,7 @@ class UConvBlock(nn.Module):
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
         self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.
+            in_channels * upsampling_depth, in_channels, 0.1
         )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
