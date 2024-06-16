@@ -164,8 +164,8 @@ def main(config):
     # Model info
     duke_input = torch.rand(int(config["datamodule"]["data_config"]["batch_size"]), int(config["datamodule"]["data_config"]["sample_rate"]*config["datamodule"]["data_config"]["segment"]), dtype=torch.float32, device='cpu')
     macs, params = profile(model, inputs=(duke_input,))
-    mb = 1024 * 1024
-    print_only(f"MACs: [{macs / mb / 1024}] Gb \nParams: [{params / mb}] Mb")
+    mb = 1000 * 1000
+    print_only(f"MACs: [{macs / mb / 1000}] G \nParams: [{params / mb}] M")
 
     # default logger used by trainer
     logger_dir = os.path.join(os.getcwd(), "Experiments", "tensorboard_logs")

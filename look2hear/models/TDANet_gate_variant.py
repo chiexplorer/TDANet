@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.TransXNet import DynamicConv1d, CrossAttention1D
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -26,16 +25,6 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     random_tensor.floor_()  # binarize
     output = x.div(keep_prob) * random_tensor
     return output
-
-def get_feat_len(feat_len, depth):
-    """ get feature length after [depth-1] times downsample """
-    feat_len_tmp = feat_len
-    feat_lens = [feat_len]
-    for i in range(depth - 1):
-        feat_len_tmp = (feat_len_tmp + 1) // 2
-        feat_lens.append(feat_len_tmp)
-    feat_lens.reverse()  # 翻转
-    return feat_len_tmp
 
 
 class DropPath(nn.Module):
@@ -261,12 +250,12 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
+        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        # x = x + self.drop_path(self.attn(x))
+        x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -275,12 +264,8 @@ class LA(nn.Module):
     def __init__(self, inp: int, oup: int, kernel: int = 1) -> None:
         super().__init__()
         groups = 1
-        assert inp == oup, "IDConv doesn't support <inp != oup> case yet."
         if inp == oup:
             groups = inp
-        # self.local_embedding = DynamicConv1d( inp, kernel, 4, 2, stride=1, bias=False, act_cfg=None)
-        # self.global_embedding = DynamicConv1d( inp, kernel, 4, 2, stride=1, bias=False, act_cfg=None)
-        # self.global_act = DynamicConv1d( inp, kernel, 4, 2, stride=1, bias=False, act_cfg=None)
         self.local_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
         self.global_embedding = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
         self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
@@ -311,31 +296,17 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
-        self.feat_len = feat_len
-        assert feat_len is not None, "Fool, you need to provide the feature length!"
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
             DilatedConvNorm(
                 in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
             )
         )
-        # IDConv改版
-        # DynamicConv1d(
-        #     in_channels, 5, 4, 2, stride=1, bias=True, act_cfg=None
-        # )
-        self.global_mixers = nn.ModuleList([])  # OSRA融合块改版
-        self.global_mixers.append(
-            CrossAttention1D(
-                in_channels,
-                num_heads=1,
-                qk_scale=None,
-                attn_drop=0,
-                sr_ratio=1,
-            ))  # OSRA融合块改版
+
         for i in range(1, upsampling_depth):
             if i == 0:
                 stride = 1
@@ -349,19 +320,6 @@ class UConvBlock(nn.Module):
                     stride=stride,
                     groups=in_channels,
                     d=1,
-                )
-            )
-            # # IDConv改版
-            # DynamicConv1d(
-            #     in_channels, 5, 4, 2, stride=2, bias=True, act_cfg=None
-            # )
-            self.global_mixers.append(
-                CrossAttention1D(
-                    in_channels,
-                    num_heads=1,
-                    qk_scale=None,
-                    attn_drop=0,
-                    sr_ratio=1,
                 )
             )
 
@@ -400,8 +358,7 @@ class UConvBlock(nn.Module):
         x_fused = []
         # Gather them now in reverse order
         for idx in range(self.depth):
-            tmp = self.global_mixers[idx](output[idx], global_f)  # OSRA融合块改版
-            # tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]  # origin
+            tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
             x_fused.append(tmp)
 
         expanded = None
@@ -414,9 +371,9 @@ class UConvBlock(nn.Module):
 
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -432,8 +389,83 @@ class Recurrent(nn.Module):
                 x = self.unet(self.concat_block(mixture + x))
         return x
 
+class GatedRecurrent(nn.Module):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
+        super().__init__()
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
+        self.iter = _iter
+        kernel_size = 3  # 写死的超参
+        # self.attention = Attention_block(out_channels)
+        self.concat_block = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, 1, 1, groups=out_channels), nn.PReLU()
+        )
+        self.reset_conv_x = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                      groups=out_channels),
+            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
+        )
+        self.reset_conv_h = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                      groups=out_channels),
+            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
+        )
+        self.update_conv_x = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                      groups=out_channels),
+            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
+        )
+        self.update_conv_h = nn.Sequential(
+            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                      groups=out_channels),
+            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
+        )
+        self.output_conv_x = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                       groups=out_channels)
+        self.output_conv_h = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
+                                       groups=out_channels)
+        self.reset_gate_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
+        self.update_gate_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
+        self.output_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
+        self.activation = nn.Tanh()
+        self.in_act = nn.PReLU()
 
-class TDANetTranXNet(BaseModel):
+    def reset_gate(self, x0, h):
+        r = self.reset_conv_x(x0) + self.reset_conv_h(h)
+        rn = self.reset_gate_norm(r)
+        rns = torch.sigmoid(rn)
+        return rns
+
+    def update_gate(self, x, h):
+        u = self.update_conv_x(x) + self.update_conv_h(h)
+        un = self.update_gate_norm(u)
+        uns = torch.sigmoid(un)
+        return uns
+
+    def output(self, x, h, r, u):
+        o = self.output_conv_x(x) + self.output_conv_h(r * h)
+        on = self.output_norm(o)
+        return on
+
+    def forward(self, x):
+        mixture = x.clone()
+        for i in range(self.iter):
+            if i == 0:
+                x = self.unet(self.in_act(x))
+            else:
+                # x = self.unet(self.concat_block(mixture + x))  # origin
+
+                r = self.reset_gate(mixture, x)
+                # u = self.unet(self.concat_block(mixture + x))
+                u = self.update_gate(mixture, x)
+                h = self.unet(self.in_act(x))
+                # o = self.output(mixture, x, r, u)
+                # y = self.activation(o)
+                x = h * u + mixture * r
+
+        return x
+
+
+class TDANetGateVariant(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -445,7 +477,7 @@ class TDANetTranXNet(BaseModel):
         sample_rate=16000,
         feat_len=3010
     ):
-        super(TDANetTranXNet, self).__init__(sample_rate=sample_rate)
+        super(TDANetGateVariant, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -479,7 +511,7 @@ class TDANetTranXNet(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)
+        self.sm = GatedRecurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -564,10 +596,10 @@ if __name__ == '__main__':
     import time
     from thop import profile
     from torchinfo import summary
-    sr = 8000
+    sr = 16000
     model_configs = {
         "out_channels": 128,
-        "in_channels": 256,
+        "in_channels": 512,
         "num_blocks": 8,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
@@ -578,13 +610,13 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetTranXNet(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 24000, dtype=torch.float32, device=device)
+    model = TDANetGateVariant(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, 32000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
     print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
-    summary(model, input_size=(1, 24000), mode="train")
+    summary(model, input_size=(1, 32000), mode="train")
     start_time = time.time()
     y = model(x)
     print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)

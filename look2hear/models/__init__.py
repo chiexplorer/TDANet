@@ -15,6 +15,8 @@ from .TDANet_attn import TDANetAttn
 from .TDANet_chunk import TDANetChunk
 from .TDANet_transxnet import TDANetTranXNet
 from .TDANet_MSFFN import TDANetMSFFN
+from .TDANet_gate_variant import TDANetGateVariant
+from .TDANet_OSRA_gated import TDANetGateOSRA
 
 __all__ = [
     "BaseModel",
@@ -27,7 +29,9 @@ __all__ = [
     "TDANetAttn",
     "TDANetChunk",
     "TDANetTranXNet",
-    "TDANetMSFFN"
+    "TDANetMSFFN",
+    "TDANetGateVariant",
+    "TDANetGateOSRA"
 ]
 
 

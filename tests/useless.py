@@ -2,7 +2,7 @@ import os
 import torch
 import torch.nn as nn
 
-def get_feat_len(feat_len, depth):
+def get_feat_lens(feat_len, depth):
     feat_len_tmp = feat_len
     feat_lens = [feat_len]
     for i in range(depth - 1):
@@ -10,6 +10,15 @@ def get_feat_len(feat_len, depth):
         feat_lens.append(feat_len_tmp)
     feat_lens.reverse()  # 翻转
     return feat_lens
+
+def get_feat_len(feat_len, depth):
+    feat_len_tmp = feat_len
+    feat_lens = [feat_len]
+    for i in range(depth - 1):
+        feat_len_tmp = (feat_len_tmp + 1) // 2
+        feat_lens.append(feat_len_tmp)
+    feat_lens.reverse()  # 翻转
+    return feat_len_tmp
 
 
 if __name__ == '__main__':
@@ -61,3 +70,4 @@ if __name__ == '__main__':
     #         padding=p,
     #         bias=False)
     # print(encoder(x).shape)
+    print(get_feat_len(3010, 5))
