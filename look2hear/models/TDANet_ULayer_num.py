@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.TransXNet import Attention1D, Mlp1D
+
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -26,15 +26,6 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     output = x.div(keep_prob) * random_tensor
     return output
 
-def get_feat_len(feat_len, depth):
-    """ get feature length after [depth-1] times downsample """
-    feat_len_tmp = feat_len
-    feat_lens = [feat_len]
-    for i in range(depth - 1):
-        feat_len_tmp = (feat_len_tmp + 1) // 2
-        feat_lens.append(feat_len_tmp)
-    feat_lens.reverse()  # 翻转
-    return feat_len_tmp
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -257,22 +248,14 @@ class MultiHeadAttention(nn.Module):
 
 
 class GlobalAttention(nn.Module):
-    def __init__(self, in_chan, out_chan, drop_path, num_heads=4, sr_ratio=4) -> None:
+    def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
         # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        # self.msffn = Mlp1D(in_chan, act_cfg=dict(type='PReLU'))
-        self.attn = Attention1D(out_chan,
-                 num_heads=num_heads,
-                 qk_scale=None,
-                 attn_drop=0.,
-                 sr_ratio=sr_ratio,)
-
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(self, x, relative_pos_enc=None):
-        # x = x + self.msffn(x)
-        x = x + self.drop_path(self.attn(x, relative_pos_enc=relative_pos_enc))
+    def forward(self, x):
+        # x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -313,12 +296,10 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
-        assert feat_len is not None, "Fool, you need to provide the feature length!"
-        self.feat_len = feat_len
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
             DilatedConvNorm(
@@ -330,7 +311,7 @@ class UConvBlock(nn.Module):
             if i == 0:
                 stride = 1
             else:
-                stride = 2
+                stride = 16
             self.spp_dw.append(
                 DilatedConvNorm(
                     in_channels,
@@ -343,17 +324,10 @@ class UConvBlock(nn.Module):
             )
 
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
-        # 写死的超参
-        num_heads = 4
-        sr_ratio = 1
-        self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.1, num_heads=num_heads, sr_ratio=sr_ratio
-        )
-        # RPE
-        num_patches = get_feat_len(self.feat_len, self.depth)
-        sr_patches = math.ceil(num_patches / sr_ratio)
-        self.relative_pos_enc = nn.Parameter(torch.zeros(1, num_heads, num_patches, sr_patches), requires_grad=True)
 
+        self.globalatt = GlobalAttention(
+            in_channels * upsampling_depth, in_channels, 0.1
+        )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
             self.last_layer.append(LA(in_channels, in_channels, 5))
@@ -379,7 +353,7 @@ class UConvBlock(nn.Module):
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
             ))
-        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1), self.relative_pos_enc)  # [B, N, T]
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
 
         x_fused = []
         # Gather them now in reverse order
@@ -397,9 +371,9 @@ class UConvBlock(nn.Module):
 
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len=feat_len)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -415,83 +389,8 @@ class Recurrent(nn.Module):
                 x = self.unet(self.concat_block(mixture + x))
         return x
 
-class GatedRecurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
-        super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len=feat_len)
-        self.iter = _iter
-        kernel_size = 3  # 写死的超参
-        # self.attention = Attention_block(out_channels)
-        self.concat_block = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, 1, 1, groups=out_channels), nn.PReLU()
-        )
-        self.reset_conv_x = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                      groups=out_channels),
-            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
-        )
-        self.reset_conv_h = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                      groups=out_channels),
-            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
-        )
-        self.update_conv_x = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                      groups=out_channels),
-            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
-        )
-        self.update_conv_h = nn.Sequential(
-            nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                      groups=out_channels),
-            nn.Conv1d(out_channels, out_channels, kernel_size=1, groups=1)
-        )
-        self.output_conv_x = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                       groups=out_channels)
-        self.output_conv_h = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size // 2,
-                                       groups=out_channels)
-        self.reset_gate_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
-        self.update_gate_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
-        self.output_norm = nn.GroupNorm(1, out_channels, 1e-6, True)
-        self.activation = nn.Tanh()
-        self.in_act = nn.PReLU()
 
-    def reset_gate(self, x0, h):
-        r = self.reset_conv_x(x0) + self.reset_conv_h(h)
-        rn = self.reset_gate_norm(r)
-        rns = torch.sigmoid(rn)
-        return rns
-
-    def update_gate(self, x, h):
-        u = self.update_conv_x(x) + self.update_conv_h(h)
-        un = self.update_gate_norm(u)
-        uns = torch.sigmoid(un)
-        return uns
-
-    def output(self, x, h, r, u):
-        o = self.output_conv_x(x) + self.output_conv_h(r * h)
-        on = self.output_norm(o)
-        return on
-
-    def forward(self, x):
-        mixture = x.clone()
-        for i in range(self.iter):
-            if i == 0:
-                x = self.unet(self.in_act(x))
-            else:
-                # x = self.unet(self.concat_block(mixture + x))  # origin
-
-                r = self.reset_gate(mixture, x)
-                # u = self.unet(self.concat_block(mixture + x))
-                u = self.update_gate(mixture, x)
-                h = self.unet(self.in_act(x))
-                # o = self.output(mixture, x, r, u)
-                # y = self.activation(o)
-                x = h * u + mixture * r
-
-        return x
-
-
-class TDANetGateOSRA(BaseModel):
+class TDANetULayerNum(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -503,7 +402,7 @@ class TDANetGateOSRA(BaseModel):
         sample_rate=16000,
         feat_len=3010
     ):
-        super(TDANetGateOSRA, self).__init__(sample_rate=sample_rate)
+        super(TDANetULayerNum, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -537,7 +436,7 @@ class TDANetGateOSRA(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)
+        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -622,12 +521,13 @@ if __name__ == '__main__':
     import time
     from thop import profile
     from torchinfo import summary
-    sr = 16000
+    sr = 8000
+    audio_len = 24000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
         "num_blocks": 16,
-        "upsampling_depth": 5,
+        "upsampling_depth": 2,
         "enc_kernel_size": 4,
         "num_sources": 2,
         "feat_len": 3010
@@ -636,13 +536,13 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetGateOSRA(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 32000, dtype=torch.float32, device=device)
+    model = TDANetULayerNum(sample_rate=sr, **model_configs).cuda()
+    x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
-    print(f"MACs: [{macs/mb/1000}] G \nParams: [{params/mb}] M")
+    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
-    summary(model, input_size=(1, 32000), mode="train")
+    summary(model, input_size=(1, audio_len), mode="train")
     start_time = time.time()
     y = model(x)
     print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)

@@ -17,6 +17,8 @@ from .TDANet_transxnet import TDANetTranXNet
 from .TDANet_MSFFN import TDANetMSFFN
 from .TDANet_gate_variant import TDANetGateVariant
 from .TDANet_OSRA_gated import TDANetGateOSRA
+from .TDANet_useless import TDANetDynamicDownsample
+from .TDANet_ULayer_num import TDANetULayerNum
 
 __all__ = [
     "BaseModel",
@@ -31,7 +33,9 @@ __all__ = [
     "TDANetTranXNet",
     "TDANetMSFFN",
     "TDANetGateVariant",
-    "TDANetGateOSRA"
+    "TDANetGateOSRA",
+    "TDANetDynamicDownsample",
+    "TDANetULayerNum"
 ]
 
 

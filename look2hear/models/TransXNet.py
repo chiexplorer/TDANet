@@ -471,7 +471,6 @@ class DynamicConv1d(nn.Module):  ### IDConv
 
         return x.reshape(B, C, -1)
 
-
 class HybridTokenMixer(nn.Module):  ### D-Mixer
     def __init__(self,
                  dim,
@@ -688,6 +687,13 @@ class Mlp1D(nn.Module):  ### MS-FFN 1D
                 GlobLN(hidden_features)
             )
             self.act = nn.GELU()
+        elif act_cfg['type'] == 'PReLU':
+            self.fc1 = nn.Sequential(
+                nn.Conv1d(in_features, hidden_features, kernel_size=1, bias=False),
+                nn.PReLU(),
+                GlobLN(hidden_features)
+            )
+            self.act = nn.PReLU()
         else:
             self.fc1 = nn.Sequential(
                 nn.Conv1d(in_features, hidden_features, kernel_size=1, bias=False),
@@ -1327,17 +1333,18 @@ if __name__ == '__main__':
     # y = module(x)
     # print(y.shape)
 
-    # # IDConv 1D形式
-    # module = DynamicConv1d(64, 3, 4, 2, stride=2, bias=False).cuda()
-    # # module = nn.Conv2d(64, 64, 3, padding=1, groups=64).cuda()
-    # x = torch.rand(1, 64, 1500, device=device)
-    # macs, params = profile(module, inputs=(x,))
-    # mb = 1000 * 1000
-    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(module, input_size=(1, 64, 1500), mode="train")
-    # y = module(x)
-    # print(y.shape)
+    # IDConv 1D形式
+    feat_len = 3010
+    module = DynamicConv1d(512, 3, 4, 2, stride=2, bias=True).cuda()
+    # module = nn.Conv2d(64, 64, 3, padding=1, groups=64).cuda()
+    x = torch.rand(1, 512, feat_len, device=device)
+    macs, params = profile(module, inputs=(x,))
+    mb = 1000 * 1000
+    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(module, input_size=(1, 512, feat_len), mode="train")
+    y = module(x)
+    print(y.shape)
 
     # # OSRA测试
     # dim = 64
@@ -1403,26 +1410,26 @@ if __name__ == '__main__':
     # y = module(x)
     # print(y.shape)
 
-    # # Block 1D 测试
-    block = Block1D(
-        64,
-        kernel_size=3,
-        num_groups=2,
-        num_heads=1,
-        sr_ratio=1,
-        mlp_ratio=4,
-        norm_cfg=dict(type='GN', num_groups=1),
-        act_cfg=dict(type='GELU'),
-        drop=0,
-        drop_path=0,
-        layer_scale_init_value=1e-5,
-        grad_checkpoint=False).cuda()
-    x = torch.rand(1, 64, 1500, device=device)
-    y = block(x)
-    macs, params = profile(block, inputs=(x, ))
-    mb = 1000*1000
-    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
-    print("模型参数量详情：")
-    summary(block, input_size=(1, 64, 1500), mode="train")
-    print(y.shape)
+    # # # Block 1D 测试
+    # block = Block1D(
+    #     64,
+    #     kernel_size=3,
+    #     num_groups=2,
+    #     num_heads=1,
+    #     sr_ratio=1,
+    #     mlp_ratio=4,
+    #     norm_cfg=dict(type='GN', num_groups=1),
+    #     act_cfg=dict(type='GELU'),
+    #     drop=0,
+    #     drop_path=0,
+    #     layer_scale_init_value=1e-5,
+    #     grad_checkpoint=False).cuda()
+    # x = torch.rand(1, 64, 1500, device=device)
+    # y = block(x)
+    # macs, params = profile(block, inputs=(x, ))
+    # mb = 1000*1000
+    # print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(block, input_size=(1, 64, 1500), mode="train")
+    # print(y.shape)
 

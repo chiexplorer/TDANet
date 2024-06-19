@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.TransXNet import Attention1D, Mlp1D
+from look2hear.models.TransXNet import Attention1D, Mlp1D, DynamicConv1d
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -260,19 +260,11 @@ class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path, num_heads=4, sr_ratio=4) -> None:
         super().__init__()
         # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        # self.msffn = Mlp1D(in_chan, act_cfg=dict(type='PReLU'))
-        self.attn = Attention1D(out_chan,
-                 num_heads=num_heads,
-                 qk_scale=None,
-                 attn_drop=0.,
-                 sr_ratio=sr_ratio,)
-
         self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x, relative_pos_enc=None):
-        # x = x + self.msffn(x)
-        x = x + self.drop_path(self.attn(x, relative_pos_enc=relative_pos_enc))
+        # x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -321,10 +313,19 @@ class UConvBlock(nn.Module):
         self.feat_len = feat_len
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
-            DilatedConvNorm(
-                in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
+            DynamicConv1d(
+                in_channels,
+                kernel_size=5,
+                reduction_ratio=4,
+                num_groups=2,
+                stride=1,
+                act_cfg=None,
+                bias=True
             )
         )
+        # DilatedConvNorm(
+        #     in_channels, in_channels, kSize=5, stride=1, groups=in_channels, d=1
+        # )
 
         for i in range(1, upsampling_depth):
             if i == 0:
@@ -332,27 +333,36 @@ class UConvBlock(nn.Module):
             else:
                 stride = 2
             self.spp_dw.append(
-                DilatedConvNorm(
+                DynamicConv1d(
                     in_channels,
-                    in_channels,
-                    kSize=2 * stride + 1,
+                    kernel_size=2 * stride + 1,
+                    reduction_ratio=4,
+                    num_groups=2,
                     stride=stride,
-                    groups=in_channels,
-                    d=1,
+                    act_cfg=None,
+                    bias=True
                 )
             )
+            # DilatedConvNorm(
+            #     in_channels,
+            #     in_channels,
+            #     kSize=2 * stride + 1,
+            #     stride=stride,
+            #     groups=in_channels,
+            #     d=1,
+            # )
 
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
         # 写死的超参
-        num_heads = 4
+        num_heads = 2
         sr_ratio = 1
         self.globalatt = GlobalAttention(
             in_channels * upsampling_depth, in_channels, 0.1, num_heads=num_heads, sr_ratio=sr_ratio
         )
-        # RPE
-        num_patches = get_feat_len(self.feat_len, self.depth)
-        sr_patches = math.ceil(num_patches / sr_ratio)
-        self.relative_pos_enc = nn.Parameter(torch.zeros(1, num_heads, num_patches, sr_patches), requires_grad=True)
+        # # RPE
+        # num_patches = get_feat_len(self.feat_len, self.depth)
+        # sr_patches = math.ceil(num_patches / sr_ratio)
+        # self.relative_pos_enc = nn.Parameter(torch.zeros(1, num_heads, num_patches, sr_patches), requires_grad=True)
 
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
@@ -379,7 +389,7 @@ class UConvBlock(nn.Module):
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
             ))
-        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1), self.relative_pos_enc)  # [B, N, T]
+        global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
 
         x_fused = []
         # Gather them now in reverse order
@@ -491,7 +501,7 @@ class GatedRecurrent(nn.Module):
         return x
 
 
-class TDANetGateOSRA(BaseModel):
+class TDANetDynamicDownsample(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -503,7 +513,7 @@ class TDANetGateOSRA(BaseModel):
         sample_rate=16000,
         feat_len=3010
     ):
-        super(TDANetGateOSRA, self).__init__(sample_rate=sample_rate)
+        super(TDANetDynamicDownsample, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -636,7 +646,7 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetGateOSRA(sample_rate=sr, **model_configs).cuda()
+    model = TDANetDynamicDownsample(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, 32000, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
