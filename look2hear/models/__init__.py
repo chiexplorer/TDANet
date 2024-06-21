@@ -19,6 +19,8 @@ from .TDANet_gate_variant import TDANetGateVariant
 from .TDANet_OSRA_gated import TDANetGateOSRA
 from .TDANet_useless import TDANetDynamicDownsample
 from .TDANet_ULayer_num import TDANetULayerNum
+from .TDANet_EMCAD import TDANetEMCAD
+from .TDANet_EMCAD_f1 import TDANetEMCADF1
 
 __all__ = [
     "BaseModel",
@@ -35,7 +37,9 @@ __all__ = [
     "TDANetGateVariant",
     "TDANetGateOSRA",
     "TDANetDynamicDownsample",
-    "TDANetULayerNum"
+    "TDANetULayerNum",
+    "TDANetEMCAD",
+    "TDANetEMCADF1"
 ]
 
 
