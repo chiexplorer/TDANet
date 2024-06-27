@@ -21,6 +21,7 @@ from .TDANet_useless import TDANetDynamicDownsample
 from .TDANet_ULayer_num import TDANetULayerNum
 from .TDANet_EMCAD import TDANetEMCAD
 from .TDANet_EMCAD_f1 import TDANetEMCADF1
+from .TDANet_no_drop import TDANetNoDrop
 
 __all__ = [
     "BaseModel",
@@ -39,7 +40,8 @@ __all__ = [
     "TDANetDynamicDownsample",
     "TDANetULayerNum",
     "TDANetEMCAD",
-    "TDANetEMCADF1"
+    "TDANetEMCADF1",
+    "TDANetNoDrop"
 ]
 
 

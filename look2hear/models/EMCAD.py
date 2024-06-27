@@ -153,10 +153,10 @@ class MSCB(nn.Module):
         self.ex_channels = int(self.in_channels * self.expansion_factor)
         self.pconv1 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
+            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, self.in_channels, bias=False),
             nn.GroupNorm(1, self.ex_channels),
             act_layer(self.activation, inplace=True)
-        )
+        )  # 轻量化v1
         self.msdc = MSDC(self.ex_channels, self.kernel_sizes, self.stride, self.activation,
                          dw_parallel=self.dw_parallel)
         if self.add == True:
@@ -165,9 +165,9 @@ class MSCB(nn.Module):
             self.combined_channels = self.ex_channels * self.n_scales
         self.pconv2 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, bias=False),
+            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, groups=self.combined_channels, bias=False),
             nn.GroupNorm(1, self.out_channels),
-        )
+        )  # 轻量化v1
         if self.use_skip_connection and (self.in_channels != self.out_channels):
             self.conv1x1 = nn.Conv1d(self.in_channels, self.out_channels, 1, 1, 0, bias=False)
         self.init_weights('normal')
@@ -227,9 +227,9 @@ class EUCB(nn.Module):
             nn.GroupNorm(1, self.in_channels),
             act_layer(activation, inplace=True)
         )
-        self.pwc = nn.Sequential(
-            nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
-        )
+        # self.pwc = nn.Sequential(
+        #     nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
+        # )  # 轻量化v1
         self.init_weights('normal')
 
     def init_weights(self, scheme=''):
@@ -238,7 +238,7 @@ class EUCB(nn.Module):
     def forward(self, x):
         x = self.up_dwc(x)
         x = channel_shuffle(x, self.in_channels)
-        x = self.pwc(x)
+        # x = self.pwc(x)
         return x
 
 
@@ -575,6 +575,7 @@ class EMCADF1(nn.Module):
 if __name__ == '__main__':
     from torchinfo import summary
     from thop import profile
+    from ptflops import get_model_complexity_info
 
 
     def get_skips(shape, channs, n_layers=4, scale_0=4, scale_n=2, device="cpu"):
@@ -606,24 +607,51 @@ if __name__ == '__main__':
                 skips.append(torch.rand(B, channs[i + 1], h, w, device=device))
         return skips
 
+    # 定义包装函数
+    def multiple_input_forward(model, inputs):
+        return model(*inputs)
+
+    # 自定义的计算复杂度函数
+    def get_complexity_with_multiple_inputs(model, input_res):
+        assert isinstance(input_res, tuple), "Input resolution should be a tuple of resolutions for each input"
+
+        # 用于模拟输入数据的元组
+        inputs = tuple(torch.randn(*in_res).cuda() for in_res in input_res)
+
+        macs, params = get_model_complexity_info(
+            model, input_res, as_strings=True, print_per_layer_stat=True,
+            input_constructor=lambda _: inputs
+        )
+        return macs, params
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # # EMCADTDANet测试
-    # feat_len = 3010
-    # channs = [512]*5
-    # model = EMCAD(channels=channs, feat_len=feat_len, expansion_factor=0.5).cuda()
-    # shape = (4, 512, feat_len)
-    #
-    # x = torch.rand(*shape, device=device)
-    # skips = get_skips(x.shape, channs, n_layers=5, device=device)
+    # EMCAD4TDANet测试
+    x_len = 3010
+    feat_len = 189
+
+    channs = [512]*5
+    model = EMCAD(channels=channs, feat_len=x_len, expansion_factor=1).cuda()
+    shape = (1, 512, feat_len)
+    l0_shape = (1, 512, x_len)
+    x = torch.rand(*shape, device=device)
+    skips = get_skips(l0_shape, channs, n_layers=5, device=device)
+    mb = 1000 * 1000
     # y = model(skips[-1], skips)
     # print(y[0].shape, y[1].shape, y[2].shape, y[3].shape, y[4].shape)
-    # macs, params = profile(model, inputs=(x, skips))
-    # mb = 1000 * 1000
-    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(model, input_data=(x, skips), mode="train")
+    # 计算复杂度
+    macs, params = profile(model, inputs=(x, skips))
+    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    print("模型参数量详情：")
+    summary(model, input_data=(x, skips), mode="train")
+    # # 详细计算复杂度
+    # input_res = ((1, 512, feat_len), (1, 512, feat_len))
+    # macs, params = get_model_complexity_info(
+    #     model, shape, as_strings=False, print_per_layer_stat=True, input_constructor=lambda _: {"x": x, "skips": skips}
+    # )
+    # print(f'Computational complexity: {macs/mb}')
+    # print(f'Number of parameters: {params/mb/1000}')
+
 
     # # EUCB测试
     # module = EUCB(753, 16, 16, kernel_size=3, stride=1, activation='relu').cuda()
@@ -631,18 +659,69 @@ if __name__ == '__main__':
     # y = module(x)
     # print(y.shape)
 
-    # # EMCADF1测试
-    feat_len = 3010
-    channs = [512]*5
-    model = EMCADF1(channels=channs, feat_len=feat_len, expansion_factor=0.5).cuda()
-    shape = (4, 512, feat_len)
+    # # # EMCADF1测试
+    # feat_len = 3010
+    # channs = [512]*5
+    # model = EMCADF1(channels=channs, feat_len=feat_len, expansion_factor=0.5).cuda()
+    # shape = (1, 512, feat_len)
+    #
+    # x = torch.rand(*shape, device=device)
+    # skips = get_skips(x.shape, channs, n_layers=5, device=device)
+    # y = model(skips[-1], skips)
+    # print(y.shape)
+    # # macs, params = profile(model, inputs=(x, skips))
+    # # mb = 1000 * 1000
+    # # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_data=(x, skips), mode="train")
 
-    x = torch.rand(*shape, device=device)
-    skips = get_skips(x.shape, channs, n_layers=5, device=device)
-    y = model(skips[-1], skips)
-    print(y.shape)
-    # macs, params = profile(model, inputs=(x, skips))
+    # CAB复杂度测试
+    # module = CAB(512).cuda()
+    # x = torch.rand(1, 512, 3010, device=device)
+    # macs, params = profile(module, inputs=(x))
     # mb = 1000 * 1000
     # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_data=(x, skips), mode="train")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x), mode="train")
+
+    # # SAB复杂度测试
+    # module = SAB().cuda()
+    # x = torch.rand(1, 512, 3010, device=device)
+    # macs, params = profile(module, inputs=(x, ))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, ), mode="train")
+
+    # # MSCB复杂度测试
+    # module = MSCBLayer(512, 512, n=1, stride=1, kernel_sizes=[1, 3, 5],
+    #                            expansion_factor=0.5, dw_parallel=True, add=True,
+    #                            activation='relu').cuda()
+    # x = torch.rand(1, 512, 189, device=device)
+    # macs, params = profile(module, inputs=(x, ))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, ), mode="train")
+
+    # # LGAG复杂度测试
+    # module = LGAG(F_g=512, F_l=512, F_int=256, kernel_size=3,
+    #                       groups=256, activation='relu').cuda()
+    # x = torch.rand(1, 512, 1505, device=device)
+    # skip = torch.rand_like(x, device=device)
+    # macs, params = profile(module, inputs=(x, skip))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, skip), mode="train")
+
+    # # EUCB测试
+    # feat_len = 3010
+    # module = EUCB(feat_len, 512, 512, kernel_size=3, stride=1, activation='relu').cuda()
+    # x = torch.rand(1, 512, feat_len, device=device)
+    # skip = torch.rand_like(x, device=device)
+    # macs, params = profile(module, inputs=(x, ))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, ), mode="train")

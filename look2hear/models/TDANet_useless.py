@@ -260,7 +260,7 @@ class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path, num_heads=4, sr_ratio=4) -> None:
         super().__init__()
         # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
+        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.0)  # drop消融
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x, relative_pos_enc=None):
@@ -357,8 +357,8 @@ class UConvBlock(nn.Module):
         num_heads = 2
         sr_ratio = 1
         self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.1, num_heads=num_heads, sr_ratio=sr_ratio
-        )
+            in_channels * upsampling_depth, in_channels, 0.0, num_heads=num_heads, sr_ratio=sr_ratio
+        )  # drop消融
         # # RPE
         # num_patches = get_feat_len(self.feat_len, self.depth)
         # sr_patches = math.ceil(num_patches / sr_ratio)
@@ -632,7 +632,8 @@ if __name__ == '__main__':
     import time
     from thop import profile
     from torchinfo import summary
-    sr = 16000
+    sr = 8000
+    audio_len = 24000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -647,12 +648,12 @@ if __name__ == '__main__':
     # TDANet测试
     feat_len = 3010
     model = TDANetDynamicDownsample(sample_rate=sr, **model_configs).cuda()
-    x = torch.randn(1, 32000, dtype=torch.float32, device=device)
+    x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
     print(f"MACs: [{macs/mb/1000}] G \nParams: [{params/mb}] M")
     print("模型参数量详情：")
-    summary(model, input_size=(1, 32000), mode="train")
+    summary(model, input_size=(1, audio_len), mode="train")
     start_time = time.time()
     y = model(x)
     print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)

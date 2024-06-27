@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.EMCAD import EMCAD
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -251,12 +250,12 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
+        self.attn = MultiHeadAttention(out_chan, 8, 0.0, False)
+        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.0)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        # x = x + self.drop_path(self.attn(x))
+        x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -297,12 +296,10 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
-        self.feat_len = feat_len
-        assert feat_len is not None, "Fool! You must provide feat_len parameter"
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
             DilatedConvNorm(
@@ -325,11 +322,11 @@ class UConvBlock(nn.Module):
                     d=1,
                 )
             )
-        self.emcad = EMCAD(channels=[in_channels]*upsampling_depth, feat_len=feat_len, expansion_factor=1, activation="prelu")
+
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
         self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.1
+            in_channels * upsampling_depth, in_channels, 0.0
         )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
@@ -364,22 +361,19 @@ class UConvBlock(nn.Module):
             tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
             x_fused.append(tmp)
 
-        # 插入EMCAD模块
-        x_emcaded = self.emcad(global_f, x_fused)
-        x_emcaded.reverse()
         expanded = None
         for i in range(self.depth - 2, -1, -1):
             if i == self.depth - 2:
-                expanded = self.last_layer[i](x_emcaded[i], x_emcaded[i - 1])
+                expanded = self.last_layer[i](x_fused[i], x_fused[i - 1])
             else:
-                expanded = self.last_layer[i](x_emcaded[i], expanded)
+                expanded = self.last_layer[i](x_fused[i], expanded)
         return self.res_conv(expanded) + residual
 
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len=feat_len)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -396,7 +390,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCAD(BaseModel):
+class TDANetNoDrop(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -406,9 +400,9 @@ class TDANetEMCAD(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
-        feat_len=None
+        feat_len=3010
     ):
-        super(TDANetEMCAD, self).__init__(sample_rate=sample_rate)
+        super(TDANetNoDrop, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -442,7 +436,7 @@ class TDANetEMCAD(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)
+        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -527,22 +521,23 @@ if __name__ == '__main__':
     import time
     from thop import profile
     from torchinfo import summary
-    sr = 8000
-    audio_len = 24000
+    sr = 16000
+    audio_len = 32000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
-        "num_blocks": 8,
+        "num_blocks": 16,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
         "feat_len": 3010
     }
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetEMCAD(sample_rate=sr, **model_configs).cuda()
+    model = TDANetNoDrop(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
@@ -562,4 +557,12 @@ if __name__ == '__main__':
     # print("模型参数量详情：")
     # summary(model, input_size=(1, 128, 2010), mode="train")
     # y = model(x)
+    # print(y.shape)
+
+    # # # DropPath测试
+    # feat_len = 512
+    # droppath = DropPath(drop_prob=0.1)
+    # module = Mlp(16, 16, drop=0.1)
+    # x = torch.rand(1, 16, feat_len, dtype=torch.float32, device=device)
+    # y = droppath(module(x))
     # print(y.shape)
