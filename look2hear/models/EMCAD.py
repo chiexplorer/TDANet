@@ -151,9 +151,10 @@ class MSCB(nn.Module):
 
         # expansion factor
         self.ex_channels = int(self.in_channels * self.expansion_factor)
+        # 原版：nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
         self.pconv1 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, self.in_channels, bias=False),
+            nn.Conv1d(self.in_channels, self.ex_channels, 3, 1, 1, groups=self.in_channels, bias=False),
             nn.GroupNorm(1, self.ex_channels),
             act_layer(self.activation, inplace=True)
         )  # 轻量化v1
@@ -165,7 +166,7 @@ class MSCB(nn.Module):
             self.combined_channels = self.ex_channels * self.n_scales
         self.pconv2 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, groups=self.combined_channels, bias=False),
+            nn.Conv1d(self.combined_channels, self.out_channels, 3, 1, 1, groups=self.combined_channels, bias=False),
             nn.GroupNorm(1, self.out_channels),
         )  # 轻量化v1
         if self.use_skip_connection and (self.in_channels != self.out_channels):
@@ -176,7 +177,7 @@ class MSCB(nn.Module):
         named_apply(partial(_init_weights, scheme=scheme), self)
 
     def forward(self, x):
-        pout1 = self.pconv1(x)
+        pout1 = self.pconv1(x)  # 轻量化v1
         msdc_outs = self.msdc(pout1)
         if self.add == True:
             dout = 0
@@ -185,7 +186,7 @@ class MSCB(nn.Module):
         else:
             dout = torch.cat(msdc_outs, dim=1)
         dout = channel_shuffle(dout, gcd(self.combined_channels, self.out_channels))
-        out = self.pconv2(dout)
+        out = self.pconv2(dout)  # 轻量化v1
         if self.use_skip_connection:
             if self.in_channels != self.out_channels:
                 x = self.conv1x1(x)
