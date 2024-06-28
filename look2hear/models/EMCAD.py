@@ -152,23 +152,26 @@ class MSCB(nn.Module):
         # expansion factor
         self.ex_channels = int(self.in_channels * self.expansion_factor)
         # 原版：nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
+        # 轻量化v1: nn.Conv1d(self.in_channels, self.ex_channels, 3, 1, 1, groups=self.in_channels, bias=False),
         self.pconv1 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.in_channels, self.ex_channels, 3, 1, 1, groups=self.in_channels, bias=False),
+            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
             nn.GroupNorm(1, self.ex_channels),
             act_layer(self.activation, inplace=True)
-        )  # 轻量化v1
+        )
         self.msdc = MSDC(self.ex_channels, self.kernel_sizes, self.stride, self.activation,
                          dw_parallel=self.dw_parallel)
         if self.add == True:
             self.combined_channels = self.ex_channels * 1
         else:
             self.combined_channels = self.ex_channels * self.n_scales
+        # 原版：nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, bias=False),
+        # 轻量化v1: nn.Conv1d(self.combined_channels, self.out_channels, 3, 1, 1, groups=self.combined_channels, bias=False),
         self.pconv2 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.combined_channels, self.out_channels, 3, 1, 1, groups=self.combined_channels, bias=False),
+            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, bias=False),
             nn.GroupNorm(1, self.out_channels),
-        )  # 轻量化v1
+        )
         if self.use_skip_connection and (self.in_channels != self.out_channels):
             self.conv1x1 = nn.Conv1d(self.in_channels, self.out_channels, 1, 1, 0, bias=False)
         self.init_weights('normal')
@@ -228,9 +231,9 @@ class EUCB(nn.Module):
             nn.GroupNorm(1, self.in_channels),
             act_layer(activation, inplace=True)
         )
-        # self.pwc = nn.Sequential(
-        #     nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
-        # )  # 轻量化v1
+        self.pwc = nn.Sequential(
+            nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
+        )  # 轻量化v1
         self.init_weights('normal')
 
     def init_weights(self, scheme=''):
@@ -239,7 +242,7 @@ class EUCB(nn.Module):
     def forward(self, x):
         x = self.up_dwc(x)
         x = channel_shuffle(x, self.in_channels)
-        # x = self.pwc(x)
+        x = self.pwc(x)  # 轻量化v1
         return x
 
 
@@ -640,11 +643,11 @@ if __name__ == '__main__':
     mb = 1000 * 1000
     # y = model(skips[-1], skips)
     # print(y[0].shape, y[1].shape, y[2].shape, y[3].shape, y[4].shape)
-    # 计算复杂度
-    macs, params = profile(model, inputs=(x, skips))
-    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    print("模型参数量详情：")
-    summary(model, input_data=(x, skips), mode="train")
+    # # 计算复杂度
+    # macs, params = profile(model, inputs=(x, skips))
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(model, input_data=(x, skips), mode="train")
     # # 详细计算复杂度
     # input_res = ((1, 512, feat_len), (1, 512, feat_len))
     # macs, params = get_model_complexity_info(

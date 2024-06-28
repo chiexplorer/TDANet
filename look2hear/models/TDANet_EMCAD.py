@@ -325,7 +325,7 @@ class UConvBlock(nn.Module):
                     d=1,
                 )
             )
-        self.emcad = EMCAD(channels=[in_channels]*upsampling_depth, feat_len=feat_len, expansion_factor=1, activation="prelu")
+        self.emcad = EMCAD(channels=[in_channels]*upsampling_depth, feat_len=feat_len, expansion_factor=0.25, activation="prelu")
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
         self.globalatt = GlobalAttention(
