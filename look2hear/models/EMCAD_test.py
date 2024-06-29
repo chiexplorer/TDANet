@@ -77,13 +77,14 @@ def act_layer(act, inplace=False, neg_slope=0.2, n_prelu=1):
     return layer
 
 
-def channel_shuffle(x, groups):
+def channel_shuffle(x, groups, times=1):
     batchsize, num_channels, length = x.data.size()
     channels_per_group = num_channels // groups
     # reshape
-    x = x.view(batchsize, groups,
-               channels_per_group, length)
-    x = torch.transpose(x, 1, 2).contiguous()
+    for i in range(times):
+        x = x.view(batchsize, groups,
+                   channels_per_group, length)
+        x = torch.transpose(x, 1, 2).contiguous()
     # flatten
     x = x.view(batchsize, -1, length)
     return x
@@ -153,9 +154,10 @@ class MSCB(nn.Module):
         self.ex_channels = int(self.in_channels * self.expansion_factor)
         # 原版：nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
         # 轻量化v1: nn.Conv1d(self.in_channels, self.ex_channels, 3, 1, 1, groups=self.in_channels, bias=False),
+        # 轻量化v2: nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, groups=self.in_channels//4, bias=False),
         self.pconv1 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
+            nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, groups=self.in_channels//4, bias=False),
             nn.GroupNorm(1, self.ex_channels),
             act_layer(self.activation, inplace=True)
         )
@@ -167,9 +169,10 @@ class MSCB(nn.Module):
             self.combined_channels = self.ex_channels * self.n_scales
         # 原版：nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, bias=False),
         # 轻量化v1: nn.Conv1d(self.combined_channels, self.out_channels, 3, 1, 1, groups=self.combined_channels, bias=False),
+        # 轻量化v2: nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, groups=self.combined_channels//4, bias=False),
         self.pconv2 = nn.Sequential(
             # pointwise convolution
-            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, bias=False),
+            nn.Conv1d(self.combined_channels, self.out_channels, 1, 1, 0, groups=self.combined_channels//4, bias=False),
             nn.GroupNorm(1, self.out_channels),
         )
         if self.use_skip_connection and (self.in_channels != self.out_channels):
@@ -181,6 +184,7 @@ class MSCB(nn.Module):
 
     def forward(self, x):
         pout1 = self.pconv1(x)  # 轻量化v1
+        pout1 = channel_shuffle(pout1, self.in_channels//4, 1)  # 轻量化v2 增加
         msdc_outs = self.msdc(pout1)
         if self.add == True:
             dout = 0
@@ -188,8 +192,9 @@ class MSCB(nn.Module):
                 dout = dout + dwout
         else:
             dout = torch.cat(msdc_outs, dim=1)
-        dout = channel_shuffle(dout, gcd(self.combined_channels, self.out_channels))
+        dout = channel_shuffle(dout, gcd(self.combined_channels, self.out_channels), 2)
         out = self.pconv2(dout)  # 轻量化v1
+        out = channel_shuffle(out, self.combined_channels//4, 3)  # 轻量化v2 增加
         if self.use_skip_connection:
             if self.in_channels != self.out_channels:
                 x = self.conv1x1(x)
@@ -231,9 +236,9 @@ class EUCB(nn.Module):
             nn.GroupNorm(1, self.in_channels),
             act_layer(activation, inplace=True)
         )
-        self.pwc = nn.Sequential(
-            nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
-        )  # 轻量化v1
+        # self.pwc = nn.Sequential(
+        #     nn.Conv1d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
+        # )  # 轻量化v1
         self.init_weights('normal')
 
     def init_weights(self, scheme=''):
@@ -241,8 +246,8 @@ class EUCB(nn.Module):
 
     def forward(self, x):
         x = self.up_dwc(x)
-        x = channel_shuffle(x, self.in_channels)
-        x = self.pwc(x)  # 轻量化v1
+        x = channel_shuffle(x, self.in_channels, 3)
+        # x = self.pwc(x)  # 轻量化v1
         return x
 
 
@@ -279,6 +284,48 @@ class LGAG(nn.Module):
         g1 = self.W_g(g)
         x1 = self.W_x(x)
         psi = self.activation(g1 + x1)
+        psi = self.psi(psi)
+
+        return x * psi
+
+class LGAG3(nn.Module):
+    def __init__(self, F_g, F_l, F_int, kernel_size=3, groups=1, activation='relu'):
+        super(LGAG3, self).__init__()
+
+        if kernel_size == 1:
+            groups = 1
+        self.W_g = nn.Sequential(
+            nn.Conv1d(F_g, F_int, kernel_size=kernel_size, stride=1, padding=kernel_size // 2, groups=groups,
+                      bias=True),
+            nn.GroupNorm(1, F_int)
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv1d(F_l, F_int, kernel_size=kernel_size, stride=1, padding=kernel_size // 2, groups=groups,
+                      bias=True),
+            nn.GroupNorm(1, F_int)
+        )
+        self.W_x_bottom = nn.Sequential(
+            nn.Conv1d(F_l, F_int, kernel_size=kernel_size, stride=1, padding=kernel_size // 2, groups=groups,
+                      bias=True),
+            nn.GroupNorm(1, F_int)
+        )
+        self.psi = nn.Sequential(
+            nn.Conv1d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.GroupNorm(1, 1),
+            nn.Sigmoid()
+        )
+        self.activation = act_layer(activation, inplace=True)
+
+        self.init_weights('normal')
+
+    def init_weights(self, scheme=''):
+        named_apply(partial(_init_weights, scheme=scheme), self)
+
+    def forward(self, g, x, x_bottom):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        x_bottom1 = self.W_x_bottom(x_bottom)
+        psi = self.activation(g1 + x1 + x_bottom1)
         psi = self.psi(psi)
 
         return x * psi
@@ -347,11 +394,11 @@ class SAB(nn.Module):
         return self.sigmoid(x)
 
 
-#   Efficient multi-scale convolutional attention decoding (EMCAD)
-class EMCAD(nn.Module):
+#   Efficient multi-scale convolutional attention decoding (EMCADTest)
+class EMCADTest(nn.Module):
     def __init__(self, channels=[512, 320, 128, 64], kernel_sizes=[1, 3, 5], expansion_factor=6, dw_parallel=True,
                  add=True, lgag_ks=3, activation='relu', feat_len=None):
-        super(EMCAD, self).__init__()
+        super(EMCADTest, self).__init__()
         eucb_ks = 3  # kernel size for eucb
         self.feat_len = feat_len
         assert feat_len is not None, "Fool! You must provide the feature length"
@@ -462,120 +509,6 @@ class EMCAD(nn.Module):
         return [d4, d3, d2, d1, d0]
 
 
-class EMCADF1(nn.Module):
-    def __init__(self, channels=[512, 320, 128, 64], kernel_sizes=[1, 3, 5], expansion_factor=6, dw_parallel=True,
-                 add=True, lgag_ks=3, activation='relu', feat_len=None):
-        super(EMCADF1, self).__init__()
-        eucb_ks = 3  # kernel size for eucb
-        self.feat_len = feat_len
-        assert feat_len is not None, "Fool! You must provide the feature length"
-        self.stage_len_list = get_feat_lens(feat_len, 4)  # stage对应的特征长度
-        self.mscb4 = MSCBLayer(channels[0], channels[0], n=1, stride=1, kernel_sizes=kernel_sizes,
-                               expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add,
-                               activation=activation)
-
-        self.eucb3 = EUCB(self.stage_len_list[0], in_channels=channels[0], out_channels=channels[1],
-                          kernel_size=eucb_ks, stride=eucb_ks // 2, activation=activation)
-        self.lgag3 = LGAG(F_g=channels[1], F_l=channels[1], F_int=channels[1] // 2, kernel_size=lgag_ks,
-                          groups=channels[1] // 2, activation=activation)
-        self.mscb3 = MSCBLayer(channels[1], channels[1], n=1, stride=1, kernel_sizes=kernel_sizes,
-                               expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add,
-                               activation=activation)
-
-        self.eucb2 = EUCB(self.stage_len_list[1], in_channels=channels[1], out_channels=channels[2],
-                          kernel_size=eucb_ks, stride=eucb_ks // 2, activation=activation)
-        self.lgag2 = LGAG(F_g=channels[2], F_l=channels[2], F_int=channels[2] // 2, kernel_size=lgag_ks,
-                          groups=channels[2] // 2, activation=activation)
-        self.mscb2 = MSCBLayer(channels[2], channels[2], n=1, stride=1, kernel_sizes=kernel_sizes,
-                               expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add,
-                               activation=activation)
-
-        self.eucb1 = EUCB(self.stage_len_list[2], in_channels=channels[2], out_channels=channels[3],
-                          kernel_size=eucb_ks, stride=eucb_ks // 2, activation=activation)
-        self.lgag1 = LGAG(F_g=channels[3], F_l=channels[3], F_int=int(channels[3] / 2), kernel_size=lgag_ks,
-                          groups=int(channels[3] / 2), activation=activation)
-        self.mscb1 = MSCBLayer(channels[3], channels[3], n=1, stride=1, kernel_sizes=kernel_sizes,
-                               expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add,
-                               activation=activation)
-
-        self.eucb0 = EUCB(self.stage_len_list[3], in_channels=channels[3], out_channels=channels[4],
-                          kernel_size=eucb_ks, stride=eucb_ks // 2, activation=activation)
-        self.lgag0 = LGAG(F_g=channels[4], F_l=channels[4], F_int=int(channels[4] / 2), kernel_size=lgag_ks,
-                          groups=int(channels[4] / 2), activation=activation)
-        self.mscb0 = MSCBLayer(channels[4], channels[4], n=1, stride=1, kernel_sizes=kernel_sizes,
-                               expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add,
-                               activation=activation)
-
-        self.cab4 = CAB(channels[0])
-        self.cab3 = CAB(channels[1])
-        self.cab2 = CAB(channels[2])
-        self.cab1 = CAB(channels[3])
-        self.cab0 = CAB(channels[4])
-
-        self.sab = SAB()
-
-    def forward(self, x, skips):
-        # MSCAM4
-        d4 = self.cab4(x) * x
-        d4 = self.sab(d4) * d4
-        d4 = self.mscb4(d4)
-
-        # EUCB3
-        d3 = self.eucb3(d4)
-
-        # LGAG3
-        x3 = self.lgag3(g=d3, x=skips[-2])
-
-        # Additive aggregation 3
-        d3 = d3 + x3
-
-        # MSCAM3
-        d3 = self.cab3(d3) * d3
-        d3 = self.sab(d3) * d3
-        d3 = self.mscb3(d3)
-
-        # EUCB2
-        d2 = self.eucb2(d3)
-
-        # LGAG2
-        x2 = self.lgag2(g=d2, x=skips[-3])
-
-        # Additive aggregation 2
-        d2 = d2 + x2
-
-        # MSCAM2
-        d2 = self.cab2(d2) * d2
-        d2 = self.sab(d2) * d2
-        d2 = self.mscb2(d2)
-
-        # EUCB1
-        d1 = self.eucb1(d2)
-
-        # LGAG1
-        x1 = self.lgag1(g=d1, x=skips[-4])
-
-        # Additive aggregation 1
-        d1 = d1 + x1
-
-        # MSCAM1
-        d1 = self.cab1(d1) * d1
-        d1 = self.sab(d1) * d1
-        d1 = self.mscb1(d1)
-
-        # EUCB0
-        d0 = self.eucb0(d1)
-        # LGAG0
-        x0 = self.lgag0(g=d0, x=skips[-5])
-        # Additive aggregation 0
-        d0 = d0 + x0
-        # MSCAM0
-        d0 = self.cab0(d0) * d0
-        d0 = self.sab(d0) * d0
-        d0 = self.mscb0(d0)
-
-        return d0
-
-
 if __name__ == '__main__':
     from torchinfo import summary
     from thop import profile
@@ -618,7 +551,7 @@ if __name__ == '__main__':
     # feat_len = 189
 
     # channs = [512]*5
-    # model = EMCAD(channels=channs, feat_len=x_len, expansion_factor=1).cuda()
+    # model = EMCADTest(channels=channs, feat_len=x_len, expansion_factor=1).cuda()
     # shape = (1, 512, feat_len)
     # l0_shape = (1, 512, x_len)
     # x = torch.rand(*shape, device=device)
@@ -691,16 +624,28 @@ if __name__ == '__main__':
     # print("模型参数量详情：")
     # summary(module, input_data=(x, ), mode="train")
 
-    # LGAG复杂度测试
-    module = LGAG(F_g=512, F_l=512, F_int=256, kernel_size=3,
+    # # LGAG复杂度测试
+    # module = LGAG(F_g=512, F_l=512, F_int=256, kernel_size=3,
+    #                       groups=256, activation='relu').cuda()
+    # x = torch.rand(1, 512, 1505, device=device)
+    # skip = torch.rand_like(x, device=device)
+    # macs, params = profile(module, inputs=(x, skip))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, skip), mode="train")
+
+    # LGAG3测试
+    module = LGAG3(F_g=512, F_l=512, F_int=512, kernel_size=3,
                           groups=256, activation='relu').cuda()
     x = torch.rand(1, 512, 1505, device=device)
     skip = torch.rand_like(x, device=device)
-    macs, params = profile(module, inputs=(x, skip))
+    x_bottom = torch.rand_like(x, device=device)
+    macs, params = profile(module, inputs=(x, skip, x_bottom))
     mb = 1000 * 1000
     print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
     print("模型参数量详情：")
-    summary(module, input_data=(x, skip), mode="train")
+    summary(module, input_data=(x, skip, x_bottom), mode="train")
 
     # # EUCB测试
     # feat_len = 3010

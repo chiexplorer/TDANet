@@ -17,3 +17,6 @@ huggingface-hub==0.20.3
 speechbrain==0.5.16
 fast-bss-eval==0.1.4
 wandb==0.17.0
+timm
+thop
+einops

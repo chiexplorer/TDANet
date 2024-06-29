@@ -17,11 +17,14 @@ from .TDANet_transxnet import TDANetTranXNet
 from .TDANet_MSFFN import TDANetMSFFN
 from .TDANet_gate_variant import TDANetGateVariant
 from .TDANet_OSRA_gated import TDANetGateOSRA
-from .TDANet_useless import TDANetDynamicDownsample
+from .TDANet_dynamic_down import TDANetDynamicDownsample
 from .TDANet_ULayer_num import TDANetULayerNum
 from .TDANet_EMCAD import TDANetEMCAD
+from .TDANet_intergral_v1_3 import TDANetEMCADv1_3
+from .TDANet_intergral_v1_4 import TDANetEMCADv1_4
 from .TDANet_EMCAD_f1 import TDANetEMCADF1
 from .TDANet_no_drop import TDANetNoDrop
+
 
 __all__ = [
     "BaseModel",
@@ -41,7 +44,9 @@ __all__ = [
     "TDANetULayerNum",
     "TDANetEMCAD",
     "TDANetEMCADF1",
-    "TDANetNoDrop"
+    "TDANetNoDrop",
+    "TDANetEMCADv1_3",
+    "TDANetEMCADv1_4"
 ]
 
 
