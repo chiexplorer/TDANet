@@ -404,7 +404,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCAD_v1(BaseModel):
+class TDANetEMCADv1_5(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -416,7 +416,7 @@ class TDANetEMCAD_v1(BaseModel):
         sample_rate=16000,
         feat_len=None
     ):
-        super(TDANetEMCAD_v1, self).__init__(sample_rate=sample_rate)
+        super(TDANetEMCADv1_5, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -541,7 +541,7 @@ if __name__ == '__main__':
     audio_len = 24000
     model_configs = {
         "out_channels": 128,
-        "in_channels": 512,
+        "in_channels": 384,
         "num_blocks": 8,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
@@ -552,7 +552,7 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetEMCAD_v1(sample_rate=sr, **model_configs).cuda()
+    model = TDANetEMCADv1_5(sample_rate=sr, **model_configs).cuda()
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
     # 计算参数量
     print("模型参数量详情：")
@@ -560,7 +560,7 @@ if __name__ == '__main__':
     # 模型复杂度
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
-    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
+    print(f"MACs: [{macs/mb/1000}] G \nParams: [{params/mb}] M")
     # # # 详细计算复杂度
     # mb = 1000 * 1000
     # shape = (1, audio_len)
