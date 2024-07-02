@@ -637,7 +637,7 @@ if __name__ == '__main__':
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
-        "num_blocks": 16,
+        "num_blocks": 8,
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
