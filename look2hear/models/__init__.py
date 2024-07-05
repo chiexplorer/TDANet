@@ -28,6 +28,8 @@ from .TDANet_intergral_v1_6 import TDANetEMCADv1_6
 from .TDANet_EMCAD_f1 import TDANetEMCADF1
 from .TDANet_no_drop import TDANetNoDrop
 
+from .TDANet_intergralV1_6_noIDConv import TDANetEMCADv1_6_noIDConv
+
 
 __all__ = [
     "BaseModel",
@@ -51,7 +53,8 @@ __all__ = [
     "TDANetEMCADv1_3",
     "TDANetEMCADv1_4",
     "TDANetEMCADv1_5",
-    "TDANetEMCADv1_6"
+    "TDANetEMCADv1_6",
+    "TDANetEMCADv1_6_noIDConv"
 ]
 
 
