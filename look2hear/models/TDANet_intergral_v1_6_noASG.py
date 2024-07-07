@@ -404,7 +404,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCADv1_6(BaseModel):
+class TDANetEMCADv1_6_noASG(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -416,7 +416,7 @@ class TDANetEMCADv1_6(BaseModel):
         sample_rate=16000,
         feat_len=None
     ):
-        super(TDANetEMCADv1_6, self).__init__(sample_rate=sample_rate)
+        super(TDANetEMCADv1_6_noASG, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -553,7 +553,7 @@ if __name__ == '__main__':
 
     # TDANet测试
     feat_len = 3010
-    model = TDANetEMCADv1_6(sample_rate=sr, **model_configs)
+    model = TDANetEMCADv1_6_noASG(sample_rate=sr, **model_configs)
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
     # 模型复杂度
     macs, params = profile(model, inputs=(x, ))
