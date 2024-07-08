@@ -31,6 +31,7 @@ from .TDANet_no_drop import TDANetNoDrop
 from .TDANet_intergralV1_6_noIDConv import TDANetEMCADv1_6_noIDConv
 from .TDANet_intergral_v1_6_noASG import TDANetEMCADv1_6_noASG
 from .TDANet_intergral_v1_6_noMMLP import TDANetEMCADv1_6_noMMLP
+from .TDANet_intergral_v1_6_noCBAM import TDANetEMCADv1_6_noCBAM
 
 
 __all__ = [
@@ -58,7 +59,8 @@ __all__ = [
     "TDANetEMCADv1_6",
     "TDANetEMCADv1_6_noIDConv",
     "TDANetEMCADv1_6_noASG",
-    "TDANetEMCADv1_6_noMMLP"
+    "TDANetEMCADv1_6_noMMLP",
+    "TDANetEMCADv1_6_noCBAM"
 ]
 
 
