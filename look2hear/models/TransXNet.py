@@ -471,6 +471,72 @@ class DynamicConv1d(nn.Module):  ### IDConv
 
         return x.reshape(B, C, -1)
 
+class FCDyConv1d(nn.Module):  ### IDConv
+    def __init__(self,
+                 dim,
+                 in_feat,
+                 kernel_size=3,
+                 reduction_ratio=4,
+                 num_groups=1,
+                 stride=1,
+                 act_cfg='PReLU',
+                 bias=True):
+        super().__init__()
+        assert num_groups > 1, f"num_groups {num_groups} should > 1."
+        self.num_groups = num_groups
+        self.K = kernel_size
+        self.stride = stride
+        self.bias_type = bias
+        self.weight = nn.Parameter(torch.empty(num_groups, 1, 1), requires_grad=True)
+        # self.pool = nn.AdaptiveAvgPool1d(output_size=kernel_size)
+        self.pool = nn.Linear(in_feat, kernel_size, bias=False)
+        self.proj = nn.Sequential(
+            ConvModule(dim,
+                       dim // reduction_ratio,
+                       kernel_size=1,
+                       dim=1,
+                       norm_cfg=dict(type='GN'),
+                       act_cfg=dict(type='PReLU') if act_cfg is not None else None, ),
+            nn.Conv1d(dim // reduction_ratio, dim * num_groups, kernel_size=1), )
+
+        if bias:
+            self.bias = nn.Parameter(torch.empty(num_groups, dim), requires_grad=True)
+        else:
+            self.bias = None
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.trunc_normal_(self.weight, std=0.02)
+        if self.bias is not None:
+            nn.init.trunc_normal_(self.bias, std=0.02)
+
+    def forward(self, x):
+
+        B, C, L = x.shape
+        scale = self.proj(self.pool(x)).reshape(B, self.num_groups, C, self.K)
+        scale = torch.softmax(scale, dim=1)
+        weight = scale * self.weight.unsqueeze(0)
+        weight = torch.sum(weight, dim=1, keepdim=False)
+        weight = weight.reshape(-1, 1, self.K)  # dynamic kernel weight
+
+        if self.bias is not None:
+            scale = self.proj(torch.mean(x, dim=[-1], keepdim=True))
+            scale = torch.softmax(scale.reshape(B, self.num_groups, C), dim=1)
+            bias = scale * self.bias.unsqueeze(0)
+            bias = torch.sum(bias, dim=1).flatten(0)
+        else:
+            bias = None
+
+        x = F.conv1d(x.reshape(1, -1, L),
+                     weight=weight,
+                     padding=self.K // 2,
+                     groups=B * C,
+                     stride=self.stride,
+                     bias=bias)
+
+        return x.reshape(B, C, -1)
+
 class HybridTokenMixer(nn.Module):  ### D-Mixer
     def __init__(self,
                  dim,
@@ -1293,6 +1359,7 @@ def transxnet_b(pretrained=False, pretrained_cfg=None, **kwargs):
 if __name__ == '__main__':
     from thop import profile
     from torchinfo import summary
+    from ptflops import get_model_complexity_info
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -1335,12 +1402,21 @@ if __name__ == '__main__':
 
     # IDConv 1D形式
     feat_len = 3010
-    module = DynamicConv1d(512, 3, 4, 2, stride=2, bias=True).cuda()
+    # FCDyConv1d DynamicConv1d
+    module = FCDyConv1d(512, 3, 4, 2, stride=1, bias=False).cuda()
     # module = nn.Conv2d(64, 64, 3, padding=1, groups=64).cuda()
     x = torch.rand(1, 512, feat_len, device=device)
+    kb = 1000
+    # 模型总体计算量
     macs, params = profile(module, inputs=(x,))
-    mb = 1000 * 1000
-    print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    print(f"MACs: [{macs / kb }] K \nParams: [{params / kb}] K")
+    # # 模型详细计算量
+    # shape = (1, 512, feat_len)
+    # macs, params = get_model_complexity_info(
+    #     module, shape, as_strings=False, print_per_layer_stat=True, input_constructor=lambda _: {"x": x}
+    # )
+    # print(f'Computational complexity: {macs/kb}')
+    # print(f'Number of parameters: {params/kb}')
     print("模型参数量详情：")
     summary(module, input_size=(1, 512, feat_len), mode="train")
     y = module(x)
