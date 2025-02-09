@@ -153,6 +153,7 @@ class MSCB(nn.Module):
         self.ex_channels = int(self.in_channels * self.expansion_factor)
         # 原版：nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
         # 轻量化v1: nn.Conv1d(self.in_channels, self.ex_channels, 3, 1, 1, groups=self.in_channels, bias=False),
+        # 轻量化v2: nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, groups=self.in_channels//4, bias=False),
         self.pconv1 = nn.Sequential(
             # pointwise convolution
             nn.Conv1d(self.in_channels, self.ex_channels, 1, 1, 0, bias=False),
@@ -613,9 +614,9 @@ if __name__ == '__main__':
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # # EMCAD4TDANet测试
-    # x_len = 3010
-    # feat_len = 189
+    # EMCAD4TDANet测试
+    x_len = 3010
+    feat_len = 189
 
     # channs = [512]*5
     # model = EMCAD(channels=channs, feat_len=x_len, expansion_factor=1).cuda()
@@ -680,27 +681,27 @@ if __name__ == '__main__':
     # print("模型参数量详情：")
     # summary(module, input_data=(x, ), mode="train")
 
-    # # MSCB复杂度测试
-    # module = MSCBLayer(512, 512, n=1, stride=1, kernel_sizes=[1, 3, 5],
-    #                            expansion_factor=0.5, dw_parallel=True, add=True,
-    #                            activation='relu').cuda()
-    # x = torch.rand(1, 512, 189, device=device)
-    # macs, params = profile(module, inputs=(x, ))
-    # mb = 1000 * 1000
-    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
-    # print("模型参数量详情：")
-    # summary(module, input_data=(x, ), mode="train")
-
-    # LGAG复杂度测试
-    module = LGAG(F_g=512, F_l=512, F_int=256, kernel_size=3,
-                          groups=256, activation='relu').cuda()
-    x = torch.rand(1, 512, 1505, device=device)
-    skip = torch.rand_like(x, device=device)
-    macs, params = profile(module, inputs=(x, skip))
+    # MSCB复杂度测试
+    module = MSCBLayer(512, 512, n=1, stride=1, kernel_sizes=[1, 3, 5],
+                               expansion_factor=0.5, dw_parallel=True, add=True,
+                               activation='relu').cuda()
+    x = torch.rand(1, 512, 189, device=device)
+    macs, params = profile(module, inputs=(x, ))
     mb = 1000 * 1000
     print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
     print("模型参数量详情：")
-    summary(module, input_data=(x, skip), mode="train")
+    summary(module, input_data=(x, ), mode="train")
+
+    # # LGAG复杂度测试
+    # module = LGAG(F_g=512, F_l=512, F_int=256, kernel_size=3,
+    #                       groups=256, activation='relu').cuda()
+    # x = torch.rand(1, 512, 1505, device=device)
+    # skip = torch.rand_like(x, device=device)
+    # macs, params = profile(module, inputs=(x, skip))
+    # mb = 1000 * 1000
+    # print(f"MACs: [{macs / mb / 1000}] Gb \nParams: [{params / mb}] Mb")
+    # print("模型参数量详情：")
+    # summary(module, input_data=(x, skip), mode="train")
 
     # # EUCB测试
     # feat_len = 3010

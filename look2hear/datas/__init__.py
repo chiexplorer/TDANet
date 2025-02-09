@@ -8,10 +8,12 @@ from .libri2mixdatamodule import  Libri2MixDataModule
 from .whamdatamodule import WhamDataModule
 from .lrs2datamodule import LRS2DataModule
 from .wsj02mixdatamodule import WSJ0DataModule
+from .libricssdatamodule import LibriCSSDataModule
 
 __all__ = [
     "Libri2MixDataModule",
     "WhamDataModule",
     "LRS2DataModule",
-    "WSJ0DataModule"
+    "WSJ0DataModule",
+    "LibriCSSDataModule"
 ]

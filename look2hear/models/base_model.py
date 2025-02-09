@@ -144,7 +144,7 @@ class BaseModel(nn.Module):
             model = model_class(*args, **kwargs)
             # 去除ckpt中的audio_model前缀
             conf["state_dict"] = OrderedDict({key.replace('audio_model.', ''): value for key, value in conf["state_dict"].items()})
-            model.load_state_dict(conf["state_dict"])  # , strict=False
+            model.load_state_dict(conf["state_dict"], strict=False)  # 若因ptflop报错, 加上：, strict=False
             return model
         else:
             cached_model = cached_download(pretrained_model_conf_or_path)

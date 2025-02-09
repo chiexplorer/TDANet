@@ -290,6 +290,29 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
+class LAOpt1(nn.Module):
+    def __init__(self, inp: int, oup: int, kernel: int = 1) -> None:
+        super().__init__()
+        groups = 1
+        if inp == oup:
+            groups = inp
+        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
+
+        self.act = nn.Sigmoid()
+
+    def forward(self, x_l, x_g):
+        """
+        x_g: global features
+        x_l: local features
+        """
+        B, N, T = x_l.shape
+
+        global_act = self.global_act(x_g)
+        sig_act = F.interpolate(self.act(global_act), size=T, mode="nearest")
+
+        out = x_l * sig_act + x_l
+        return out
+
 class UConvBlock(nn.Module):
     """
     This class defines the block which performs successive downsampling and
@@ -340,7 +363,7 @@ class UConvBlock(nn.Module):
         )  # noDrop?
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
-            self.last_layer.append(LA(in_channels, in_channels, 5))
+            self.last_layer.append(LAOpt1(in_channels, in_channels, 5))
 
     def forward(self, x):
         """
@@ -403,7 +426,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCADv1_6(BaseModel):
+class TDANetEMCADv1_6_LAOpt1(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -415,7 +438,7 @@ class TDANetEMCADv1_6(BaseModel):
         sample_rate=16000,
         feat_len=None
     ):
-        super(TDANetEMCADv1_6, self).__init__(sample_rate=sample_rate)
+        super(TDANetEMCADv1_6_LAOpt1, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -552,11 +575,11 @@ if __name__ == '__main__':
     device = 'cpu'
 
     # TDANet测试
-    model = TDANetEMCADv1_6(sample_rate=sr, **model_configs)
+    model = TDANetEMCADv1_6_LAOpt1(sample_rate=sr, **model_configs)
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
-    start_time = time.perf_counter()
+    start_time = time.time()
     y = model(x)
-    print("batch耗时：{:.4f}".format(time.perf_counter() - start_time))
+    print("batch耗时：{:.4f}".format(time.time() - start_time))
     # 模型复杂度
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000

@@ -5,15 +5,14 @@
 # LastEditTime: 2022-08-29 16:44:07
 ###
 from audioop import bias
-
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
-from look2hear.models.EMCAD_v1_6 import EMCADv1_6
 from look2hear.models.TransXNet import Attention1D, Mlp1D, DynamicConv1d
-
+from look2hear.models.EMCAD_v1_6 import CAB
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     if drop_prob == 0.0 or not training:
@@ -252,12 +251,12 @@ class MultiHeadAttention(nn.Module):
 class GlobalAttention(nn.Module):
     def __init__(self, in_chan, out_chan, drop_path) -> None:
         super().__init__()
-        # self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
-        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.0)  # noDrop?
+        self.attn = MultiHeadAttention(out_chan, 8, 0.1, False)
+        self.mlp = Mlp(out_chan, out_chan * 2, drop=0.1)
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
     def forward(self, x):
-        # x = x + self.drop_path(self.attn(x))
+        x = x + self.drop_path(self.attn(x))
         x = x + self.drop_path(self.mlp(x))
         return x
 
@@ -290,6 +289,29 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
+class LAOpt2(nn.Module):
+    def __init__(self, inp: int, oup: int, kernel: int = 1) -> None:
+        super().__init__()
+        groups = 1
+        if inp == oup:
+            groups = inp
+        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
+        self.cab = CAB(inp, oup, ratio=32)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x_l, x_g):
+        """
+        x_g: global features
+        x_l: local features
+        """
+        global_act = self.global_act(x_g)
+        sig_act = F.interpolate(self.act(global_act), size=x_l.shape[-1], mode="nearest")
+
+        out = x_l * sig_act
+        out = self.cab(out) * out
+
+        return out
+
 class UConvBlock(nn.Module):
     """
     This class defines the block which performs successive downsampling and
@@ -297,12 +319,10 @@ class UConvBlock(nn.Module):
     resolutions.
     """
 
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4):
         super().__init__()
         self.proj_1x1 = ConvNormAct(out_channels, in_channels, 1, stride=1, groups=1)
         self.depth = upsampling_depth
-        self.feat_len = feat_len
-        assert feat_len is not None, "Fool! You must provide feat_len parameter"
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
             DynamicConv1d(
@@ -332,15 +352,19 @@ class UConvBlock(nn.Module):
                     bias=True
                 )
             )
-        self.emcad = EMCADv1_6(channels=[in_channels]*upsampling_depth, feat_len=feat_len, expansion_factor=0.5, activation="prelu")
+        # 通道信息融合模块
+        # self.pconvs = nn.ModuleList()
+        # for _ in range(0, upsampling_depth):
+        #     self.pconvs.append(nn.Conv1d(in_channels, in_channels, 1))
+
         self.res_conv = nn.Conv1d(in_channels, out_channels, 1)
 
         self.globalatt = GlobalAttention(
-            in_channels * upsampling_depth, in_channels, 0.0
-        )  # noDrop?
+            in_channels * upsampling_depth, in_channels, 0.1
+        )
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
-            self.last_layer.append(LA(in_channels, in_channels, 5))
+            self.last_layer.append(LAOpt2(in_channels, in_channels, 5))
 
     def forward(self, x):
         """
@@ -349,44 +373,52 @@ class UConvBlock(nn.Module):
         """
         residual = x.clone()
         # Reduce --> project high-dimensional feature maps to low-dimensional space
+        time_static = {}
+        # start_time = round(time.perf_counter(), 5)
         output1 = self.proj_1x1(x)
+        # proj_time = round(time.perf_counter(), 5)
         output = [self.spp_dw[0](output1)]
-
         # Do the downsampling process from the previous level
         for k in range(1, self.depth):
             out_k = self.spp_dw[k](output[-1])
             output.append(out_k)
-
+        # downsample_time = round(time.perf_counter(), 5)
         # global features
         global_f = []
         for fea in output:
             global_f.append(F.adaptive_avg_pool1d(
                 fea, output_size=output[-1].shape[-1]
             ))
+        # glo_feat_time = round(time.perf_counter(), 5)
         global_f = self.globalatt(torch.stack(global_f, dim=1).sum(1))  # [B, N, T]
-
+        # glo_attn_time = round(time.perf_counter(), 5)
         x_fused = []
         # Gather them now in reverse order
         for idx in range(self.depth):
             tmp = F.interpolate(global_f, size=output[idx].shape[-1], mode="nearest") + output[idx]
+            # x_fused.append(self.pconvs[idx](tmp))  # 通道信息融合
             x_fused.append(tmp)
 
-        # 插入EMCAD模块
-        x_emcaded = self.emcad(global_f, x_fused)
-        x_emcaded.reverse()
         expanded = None
         for i in range(self.depth - 2, -1, -1):
             if i == self.depth - 2:
-                expanded = self.last_layer[i](x_emcaded[i], x_emcaded[i - 1])
+                expanded = self.last_layer[i](x_fused[i], x_fused[i - 1])
             else:
-                expanded = self.last_layer[i](x_emcaded[i], expanded)
+                expanded = self.last_layer[i](x_fused[i], expanded)
+        # la_time = round(time.perf_counter(), 5)
+        # time_static["proj_time"] = (proj_time - start_time) * 1000
+        # time_static["downsample_time"] = (downsample_time - proj_time) * 1000
+        # time_static["glo_feat_time"] = (glo_feat_time - downsample_time) * 1000
+        # time_static["glo_attn_time"] = (glo_attn_time - glo_feat_time) * 1000
+        # time_static["la_time"] = (la_time - glo_attn_time) * 1000
+        # print("*******UConvBlock推理耗时，depth=1*******\n", time_static)
         return self.res_conv(expanded) + residual
 
 
 class Recurrent(nn.Module):
-    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4, feat_len=None):
+    def __init__(self, out_channels=128, in_channels=512, upsampling_depth=4, _iter=4):
         super().__init__()
-        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth, feat_len=feat_len)
+        self.unet = UConvBlock(out_channels, in_channels, upsampling_depth)
         self.iter = _iter
         # self.attention = Attention_block(out_channels)
         self.concat_block = nn.Sequential(
@@ -403,7 +435,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCADv1_6(BaseModel):
+class TDANetChannelFusion(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -413,9 +445,9 @@ class TDANetEMCADv1_6(BaseModel):
         enc_kernel_size=21,
         num_sources=2,
         sample_rate=16000,
-        feat_len=None
+        feat_len=3010
     ):
-        super(TDANetEMCADv1_6, self).__init__(sample_rate=sample_rate)
+        super(TDANetChannelFusion, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -449,7 +481,7 @@ class TDANetEMCADv1_6(BaseModel):
         )
 
         # Separation module
-        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks, feat_len=feat_len)
+        self.sm = Recurrent(out_channels, in_channels, upsampling_depth, num_blocks)
 
         mask_conv = nn.Conv1d(out_channels, num_sources * self.enc_num_basis, 1)
         self.mask_net = nn.Sequential(nn.PReLU(), mask_conv)
@@ -485,6 +517,7 @@ class TDANetEMCADv1_6(BaseModel):
 
     # Forward pass
     def forward(self, input_wav):
+        time_stat = {}
         # input shape: (B, T)
         was_one_d = False
         if input_wav.ndim == 1:
@@ -494,24 +527,28 @@ class TDANetEMCADv1_6(BaseModel):
             input_wav = input_wav
         if input_wav.ndim == 3:
             input_wav = input_wav.squeeze(1)
-
+        # start_time = round(time.perf_counter(), 5)
         x, rest = self.pad_input(
             input_wav, self.enc_kernel_size, self.enc_kernel_size // 4
         )
+        # pad_time = round(time.perf_counter(), 5)
         # Front end
         x = self.encoder(x.unsqueeze(1))
-
+        # enc_time = round(time.perf_counter(), 5)
         # Split paths
         s = x.clone()
         # Separation module
         x = self.ln(x)
         x = self.bottleneck(x)
+        # bottleneck_time = round(time.perf_counter(), 5)
         x = self.sm(x)
+        # sm_time = round(time.perf_counter(), 5)
 
         x = self.mask_net(x)
         x = x.view(x.shape[0], self.num_sources, self.enc_num_basis, -1)
         x = self.mask_nl_class(x)
         x = x * s.unsqueeze(1)
+        # mask_time = round(time.perf_counter(), 5)
         # Back end
         estimated_waveforms = self.decoder(x.view(x.shape[0], -1, x.shape[-1]))
         estimated_waveforms = estimated_waveforms[
@@ -521,6 +558,15 @@ class TDANetEMCADv1_6(BaseModel):
             - self.enc_kernel_size
             // 4 : -(rest + self.enc_kernel_size - self.enc_kernel_size // 4),
         ].contiguous()
+        # dec_time = round(time.perf_counter(), 5)
+        # time_stat["pad_time"] = (pad_time - start_time) * 1000
+        # time_stat["enc_time"] = (enc_time - pad_time) * 1000
+        # time_stat["bottleneck_time"] = (bottleneck_time - enc_time) * 1000
+        # time_stat["sm_time"] = (sm_time - bottleneck_time) * 1000
+        # time_stat["mask_time"] = (mask_time - sm_time) * 1000
+        # time_stat["dec_time"] = (dec_time - mask_time) * 1000
+        # time_stat["total_time"] = (dec_time - start_time) * 1000
+        # print("*******TDANet推理耗时，depth=1*******\n", time_stat)
         if was_one_d:
             return estimated_waveforms.squeeze(0)
         return estimated_waveforms
@@ -538,7 +584,6 @@ if __name__ == '__main__':
 
     sr = 16000
     audio_len = 32000
-    feat_len = 2010
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -546,24 +591,23 @@ if __name__ == '__main__':
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
-        "feat_len": feat_len
+        "feat_len": 3010
     }
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    device = 'cpu'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = 'cpu'
 
     # TDANet测试
-    model = TDANetEMCADv1_6(sample_rate=sr, **model_configs)
+    feat_len = 3010
+    model = TDANetChannelFusion(sample_rate=sr, **model_configs).to(device)
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
-    start_time = time.perf_counter()
-    y = model(x)
-    print("batch耗时：{:.4f}".format(time.perf_counter() - start_time))
-    # 模型复杂度
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
-    print(f"MACs: [{macs/mb/1000}] G \nParams: [{params/mb}] M")
-    # 计算参数量
+    print(f"MACs: [{macs/mb/1000}] Gb \nParams: [{params/mb}] Mb")
     print("模型参数量详情：")
     summary(model, input_size=(1, audio_len), mode="train")
+    start_time = time.time()
+    y = model(x)
+    print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)
     # # # 详细计算复杂度
     # mb = 1000 * 1000
     # shape = (1, audio_len)
@@ -572,10 +616,7 @@ if __name__ == '__main__':
     # )
     # print(f'Computational complexity: {macs/mb}')
     # print(f'Number of parameters: {params/mb/1000}')
-    # # 计算耗时
-    # start_time = time.time()
-    # y = model(x)
-    # print("batch耗时：{:.4f}".format(time.time() - start_time), y.shape)
+
 
     # # # UConvBlock——参数量测试
     # model = UConvBlock(out_channels=128, in_channels=512, upsampling_depth=5).cuda()
@@ -587,3 +628,13 @@ if __name__ == '__main__':
     # summary(model, input_size=(1, 128, 2010), mode="train")
     # y = model(x)
     # print(y.shape)
+
+    # # # DropPath测试
+    # feat_len = 512
+    # droppath = DropPath(drop_prob=0.1)
+    # module = Mlp(16, 16, drop=0.1)
+    # x = torch.rand(1, 16, feat_len, dtype=torch.float32, device=device)
+    # y = droppath(module(x))
+    # print(y.shape)
+
+

@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import math
 from look2hear.models.base_model import BaseModel
 from look2hear.models.EMCAD_v1_6 import EMCADv1_6
-from look2hear.models.TransXNet import Attention1D, Mlp1D, DynamicConv1d
+from look2hear.models.TransXNet import Attention1D, Mlp1D, DynamicConv1d, FCDyConv1d
 
 
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
@@ -28,6 +28,14 @@ def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     output = x.div(keep_prob) * random_tensor
     return output
 
+def get_feat_lens(feat_len, depth):
+    feat_len_tmp = feat_len
+    feat_lens = [feat_len]
+    for i in range(depth - 1):
+        feat_len_tmp = (feat_len_tmp + 1) // 2
+        feat_lens.append(feat_len_tmp)
+    feat_lens.reverse()  # 翻转
+    return feat_lens
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
@@ -290,6 +298,7 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
+
 class UConvBlock(nn.Module):
     """
     This class defines the block which performs successive downsampling and
@@ -303,10 +312,13 @@ class UConvBlock(nn.Module):
         self.depth = upsampling_depth
         self.feat_len = feat_len
         assert feat_len is not None, "Fool! You must provide feat_len parameter"
+        self.stage_len_list = get_feat_lens(feat_len, 5)  # stage对应的特征长度
+        self.stage_len_list.reverse()
         self.spp_dw = nn.ModuleList()
         self.spp_dw.append(
-            DynamicConv1d(
+            FCDyConv1d(
                 in_channels,
+                self.stage_len_list[0],
                 kernel_size=5,
                 reduction_ratio=4,
                 num_groups=2,
@@ -322,8 +334,9 @@ class UConvBlock(nn.Module):
             else:
                 stride = 2
             self.spp_dw.append(
-                DynamicConv1d(
+                FCDyConv1d(
                     in_channels,
+                    self.stage_len_list[i-1],
                     kernel_size=2 * stride + 1,
                     reduction_ratio=4,
                     num_groups=2,
@@ -403,7 +416,7 @@ class Recurrent(nn.Module):
         return x
 
 
-class TDANetEMCADv1_6(BaseModel):
+class TDANetEMCADv1_6_FCDyConv(BaseModel):
     def __init__(
         self,
         out_channels=128,
@@ -415,7 +428,7 @@ class TDANetEMCADv1_6(BaseModel):
         sample_rate=16000,
         feat_len=None
     ):
-        super(TDANetEMCADv1_6, self).__init__(sample_rate=sample_rate)
+        super(TDANetEMCADv1_6_FCDyConv, self).__init__(sample_rate=sample_rate)
 
         # Number of sources to produce
         self.in_channels = in_channels
@@ -536,9 +549,8 @@ if __name__ == '__main__':
     from torchinfo import summary
     from ptflops import get_model_complexity_info
 
-    sr = 16000
-    audio_len = 32000
-    feat_len = 2010
+    sr = 8000
+    audio_len = 24000
     model_configs = {
         "out_channels": 128,
         "in_channels": 512,
@@ -546,17 +558,15 @@ if __name__ == '__main__':
         "upsampling_depth": 5,
         "enc_kernel_size": 4,
         "num_sources": 2,
-        "feat_len": feat_len
+        "feat_len": 3010
     }
     # device = 'cuda' if torch.cuda.is_available() else 'cpu'
     device = 'cpu'
 
     # TDANet测试
-    model = TDANetEMCADv1_6(sample_rate=sr, **model_configs)
+    feat_len = 3010
+    model = TDANetEMCADv1_6_FCDyConv(sample_rate=sr, **model_configs)
     x = torch.randn(1, audio_len, dtype=torch.float32, device=device)
-    start_time = time.perf_counter()
-    y = model(x)
-    print("batch耗时：{:.4f}".format(time.perf_counter() - start_time))
     # 模型复杂度
     macs, params = profile(model, inputs=(x, ))
     mb = 1000*1000
