@@ -290,13 +290,14 @@ class LA(nn.Module):
         out = local_feat * sig_act + global_feat
         return out
 
-class LAOpt3(nn.Module):
+class LAOpt4(nn.Module):
     def __init__(self, inp: int, oup: int, kernel: int = 1) -> None:
         super().__init__()
         groups = 1
         if inp == oup:
             groups = inp
-        self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
+        self.global_act = nn.ConvTranspose1d(inp, oup, 3, groups=groups, stride=2, padding=0, bias=False)
+        # self.global_act = ConvNorm(inp, oup, kernel, groups=groups, bias=False)
         self.cab = CAB(inp, oup, ratio=16)
         self.act = nn.Sigmoid()
 
@@ -306,8 +307,8 @@ class LAOpt3(nn.Module):
         x_l: local features
         """
         residual = x_l.clone()
-        global_act = self.global_act(x_g)
-        sig_act = F.interpolate(self.act(global_act), size=x_l.shape[-1], mode="nearest")
+        global_act = self.global_act(F.pad(x_g, (0, 1)))
+        sig_act = self.act(global_act[:, :, :x_l.shape[-1]])
 
         out = x_l * sig_act
         out = self.cab(out) * out
@@ -364,7 +365,7 @@ class UConvBlock(nn.Module):
         )  # noDrop?
         self.last_layer = nn.ModuleList([])
         for i in range(self.depth - 1):
-            self.last_layer.append(LAOpt3(in_channels, in_channels, 5))
+            self.last_layer.append(LAOpt4(in_channels, in_channels, 5))
 
     def forward(self, x):
         """
