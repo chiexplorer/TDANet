@@ -30,11 +30,13 @@ from .TDANet_no_drop import TDANetNoDrop
 from .TDANet_intergral_v1_6_FCDyConv import TDANetEMCADv1_6_FCDyConv
 from .TDANet_intergral_v1_6_LAOpt1 import TDANetEMCADv1_6_LAOpt1
 from .TDANet_channel_fusion import TDANetChannelFusion
+from .TDANet_intergral_v1_6_noCBAM_laopt3 import TDANetEMCADv1_6_noCBAM_laopt3
 
 from .TDANet_intergralV1_6_noIDConv import TDANetEMCADv1_6_noIDConv
 from .TDANet_intergral_v1_6_noASG import TDANetEMCADv1_6_noASG
 from .TDANet_intergral_v1_6_noMMLP import TDANetEMCADv1_6_noMMLP
 from .TDANet_intergral_v1_6_noCBAM import TDANetEMCADv1_6_noCBAM
+
 from .TDANet_intergral_v1_6_final import TDANetEMCADv1_6_Final
 
 
@@ -68,7 +70,8 @@ __all__ = [
     "TDANetEMCADv1_6_FCDyConv",
     "TDANetEMCADv1_6_Final",
     "TDANetEMCADv1_6_LAOpt1",
-    "TDANetChannelFusion"
+    "TDANetChannelFusion",
+    "TDANetEMCADv1_6_noCBAM_laopt3"
 ]
 
 
